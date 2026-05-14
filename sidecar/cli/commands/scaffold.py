@@ -41,10 +41,11 @@ def handle_scaffold(args: argparse.Namespace) -> int:
         rc = handle_init(init_args, _prefill=prefill)
         if rc != 0:
             return rc
+        # Pin state_path explicitly so renaming AGENT_NAME later doesn't
+        # orphan the agent's on-chain identity record.
         slug = directory.name
         with env_file.open("a", encoding="utf-8") as f:
             f.write(f"\nSIDECAR_STATE_PATH=.sidecar_state.{slug}.json\n")
-            f.write(f"SIDECAR_TX_DB_PATH=processed_txs.{slug}.db\n")
 
     print(f"\nScaffold complete! Next steps:")
     print(f"  1. Edit {agent_py}")

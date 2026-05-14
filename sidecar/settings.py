@@ -1,8 +1,23 @@
+import hashlib
 import os
+import re
 from dataclasses import dataclass
 
 
 DEFAULT_SKU_ID = "default"
+
+
+def _agent_slug(agent_name: str) -> str:
+    """Filesystem-safe identifier derived from AGENT_NAME.
+
+    Used to namespace per-agent state files so two sidecars on the same host
+    never collide on stock.db / processed_txs.db. ASCII-only; non-ASCII names
+    fall back to an md5 prefix so we never produce an empty slug.
+    """
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", agent_name).strip("-").lower()
+    if not slug:
+        slug = "agent-" + hashlib.md5(agent_name.encode("utf-8")).hexdigest()[:8]
+    return slug
 
 
 @dataclass(frozen=True)
@@ -252,10 +267,12 @@ def load_settings(env_file: str | None = None) -> Settings:
     if skus[0].price_usd is not None:
         rails.append("USDT")
 
+    agent_name = os.environ["AGENT_NAME"]
+    slug = _agent_slug(agent_name)
     return Settings(
         agent_command=os.environ["AGENT_COMMAND"],
         capability=os.environ["AGENT_CAPABILITY"],
-        agent_name=os.environ["AGENT_NAME"],
+        agent_name=agent_name,
         agent_description=os.environ["AGENT_DESCRIPTION"],
         agent_price=agent_price,
         agent_endpoint=os.environ["AGENT_ENDPOINT"],
@@ -269,9 +286,9 @@ def load_settings(env_file: str | None = None) -> Settings:
         final_timeout=int(os.getenv("AGENT_FINAL_TIMEOUT", "1200")),
         jobs_ttl=int(os.getenv("JOBS_TTL_SECONDS", "3600")),
         testnet=testnet,
-        state_path=os.getenv("SIDECAR_STATE_PATH", ".sidecar_state.json"),
-        tx_db_path=os.getenv("SIDECAR_TX_DB_PATH", "processed_txs.db"),
-        stock_db_path=os.getenv("SIDECAR_STOCK_DB_PATH", "stock.db"),
+        state_path=os.getenv("SIDECAR_STATE_PATH", f".sidecar_state.{slug}.json"),
+        tx_db_path=f"processed_txs.{slug}.db",
+        stock_db_path=f"stock.{slug}.db",
         enforce_comment_nonce=_env_bool("ENFORCE_COMMENT_NONCE", True),
         refund_fee_nanoton=int(os.getenv("REFUND_FEE_NANOTON", "500000")),
         refund_worker_interval=int(os.getenv("REFUND_WORKER_INTERVAL_SECONDS", "60")),

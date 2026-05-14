@@ -582,4 +582,6 @@ def test_handle_scaffold_creates_files(tmp_path, monkeypatch):
     assert "run" in agent_src
     env_content = (target / ".env").read_text()
     assert "SIDECAR_STATE_PATH=.sidecar_state.my-agent.json" in env_content
-    assert "SIDECAR_TX_DB_PATH=processed_txs.my-agent.db" in env_content
+    # tx_db / stock_db are derived from AGENT_NAME at load time — not written.
+    assert "SIDECAR_TX_DB_PATH" not in env_content
+    assert "SIDECAR_STOCK_DB_PATH" not in env_content

@@ -128,6 +128,41 @@ def test_load_settings_defaults(clean_env, monkeypatch):
     assert len(s.agent_wallet) > 10
 
 
+# ── Per-agent DB paths from AGENT_NAME slug ────────────────────────────
+
+def test_db_paths_derived_from_agent_name(clean_env, monkeypatch):
+    _apply_required(monkeypatch, overrides={"AGENT_NAME": "Image Gen (OpenAI)"})
+    s = load_settings(env_file="/nonexistent/.env")
+    assert s.tx_db_path == "processed_txs.image-gen-openai.db"
+    assert s.stock_db_path == "stock.image-gen-openai.db"
+
+
+def test_db_paths_ignore_env_overrides(clean_env, monkeypatch):
+    _apply_required(monkeypatch, overrides={"AGENT_NAME": "Translator"})
+    monkeypatch.setenv("SIDECAR_TX_DB_PATH", "manual_tx.db")
+    monkeypatch.setenv("SIDECAR_STOCK_DB_PATH", "manual_stock.db")
+    s = load_settings(env_file="/nonexistent/.env")
+    assert s.tx_db_path == "processed_txs.translator.db"
+    assert s.stock_db_path == "stock.translator.db"
+
+
+def test_state_path_defaults_to_slug_but_env_wins(clean_env, monkeypatch):
+    _apply_required(monkeypatch, overrides={"AGENT_NAME": "Stars Buyer"})
+    s = load_settings(env_file="/nonexistent/.env")
+    assert s.state_path == ".sidecar_state.stars-buyer.json"
+
+    monkeypatch.setenv("SIDECAR_STATE_PATH", "/var/lib/agent/state.json")
+    s2 = load_settings(env_file="/nonexistent/.env")
+    assert s2.state_path == "/var/lib/agent/state.json"
+
+
+def test_agent_slug_fallback_for_non_ascii_name(clean_env, monkeypatch):
+    _apply_required(monkeypatch, overrides={"AGENT_NAME": "Бот 名前"})
+    s = load_settings(env_file="/nonexistent/.env")
+    assert s.tx_db_path.startswith("processed_txs.agent-")
+    assert s.tx_db_path.endswith(".db")
+
+
 def test_load_settings_testnet_toggles_wallet_format(clean_env, monkeypatch):
     _apply_required(monkeypatch, {"TESTNET": "true"})
     s = load_settings(env_file="/nonexistent/.env")
