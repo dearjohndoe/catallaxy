@@ -970,3 +970,278 @@ async def test_processed_tx_store_uses_wal_and_busy_timeout(tmp_path):
         assert row[0] == 15000
     finally:
         await store.close()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# BUG 12 — Worker must not double-refund after a crash mid-send
+# ────────────────────────────────────────────────────────────────────────
+
+async def test_list_stale_refunding_returns_old_refunding_entries(tmp_path):
+    """list_stale_refunding selects entries stuck in 'refunding' past the
+    cutoff and leaves their status untouched (caller decides next step)."""
+    import time
+    from payments import RefundQueue
+    rq = RefundQueue(str(tmp_path / "pr.db"))
+    await rq.init()
+    try:
+        await rq.enqueue(tx_hash="stuck", nonce="n", rail="TON",
+                         sender="EQs", amount=1_000_000, sku_id="s")
+        await rq.claim("stuck")  # status='refunding', last_attempt_at=now
+        # Backdate last_attempt_at so it counts as stale.
+        await rq._conn.execute(
+            "UPDATE pending_refunds SET last_attempt_at = ? WHERE tx_hash = 'stuck'",
+            (int(time.time()) - 3600,),
+        )
+        await rq._conn.commit()
+
+        stale = await rq.list_stale_refunding(older_than_seconds=600)
+        assert len(stale) == 1
+        assert stale[0].tx_hash == "stuck"
+        # No mutation — entry still in 'refunding'.
+        entry = await rq.get("stuck")
+        assert entry.status == "refunding"
+    finally:
+        await rq.close()
+
+
+async def test_refund_worker_dedup_adopts_existing_onchain_hash(tmp_path, monkeypatch):
+    """When a prior worker crashed between send() and mark_refunded(), the
+    on-chain refund exists. On retry the worker must probe, find it, and
+    mark_refunded WITHOUT sending a second refund.
+    """
+    import api.domain.refund_worker as worker_module
+    from api.domain.refund_worker import _process_entry
+    from contextlib import asynccontextmanager
+    from payments import RefundQueue
+
+    rq = RefundQueue(str(tmp_path / "pr.db"))
+    await rq.init()
+    try:
+        await rq.enqueue(tx_hash="tx-A", nonce="n", rail="TON",
+                         sender="EQuser", amount=1_000_000, sku_id="s")
+        # Simulate a prior failed attempt: attempts=1 in 'pending' state.
+        await rq._conn.execute(
+            "UPDATE pending_refunds SET attempts = 1 WHERE tx_hash = 'tx-A'"
+        )
+        await rq._conn.commit()
+        entry = await rq.get("tx-A")
+
+        @asynccontextmanager
+        async def fake_client_ctx(app):
+            yield object()  # dummy
+
+        async def fake_find(**kwargs):
+            return "ALREADY_REFUNDED_HASH"
+
+        send_calls = []
+        async def fake_refund_user(**kwargs):
+            send_calls.append(kwargs)
+            return "WOULD_BE_DOUBLE_SEND"
+
+        monkeypatch.setattr(worker_module, "_acquire_lite_client", fake_client_ctx)
+        monkeypatch.setattr(worker_module, "find_existing_refund_tx", fake_find)
+        monkeypatch.setattr(worker_module, "refund_user", fake_refund_user)
+
+        # Minimal fake app surface for _process_entry.
+        app = SimpleNamespace(
+            refund_queue=rq,
+            tx_store=SimpleNamespace(is_processed=AsyncMock(return_value=False)),
+            settings=SimpleNamespace(
+                agent_wallet="EQagent", refund_max_attempts=10,
+                refund_fee_nanoton=500_000,
+            ),
+            sidecar_id="sid-test",
+            sender=None, _agent_jetton_wallet=None, verifier=None,
+            testnet=False,
+        )
+        async def fake_balance_check(*a, **kw):
+            return True, ""
+        monkeypatch.setattr(worker_module, "_check_balance_for_refund", fake_balance_check)
+        async def fake_recover(*a, **kw):
+            return True
+        monkeypatch.setattr(worker_module, "_recover_payment_info", fake_recover)
+
+        await _process_entry(app, entry)
+
+        # Worker must adopt the existing refund hash, NOT send again.
+        assert send_calls == [], (
+            f"refund_user should not run when prior refund detected on-chain; called with {send_calls}"
+        )
+        final = await rq.get("tx-A")
+        assert final.status == "refunded"
+        assert final.refund_tx == "ALREADY_REFUNDED_HASH"
+    finally:
+        await rq.close()
+
+
+async def test_refund_worker_first_attempt_skips_probe(tmp_path, monkeypatch):
+    """First attempt has nothing to dedup against — probe must be skipped to
+    save one RPC per refund."""
+    import api.domain.refund_worker as worker_module
+    from api.domain.refund_worker import _process_entry
+    from payments import RefundQueue
+
+    rq = RefundQueue(str(tmp_path / "pr.db"))
+    await rq.init()
+    try:
+        await rq.enqueue(tx_hash="tx-B", nonce="n", rail="TON",
+                         sender="EQuser", amount=1_000_000, sku_id="s")
+        entry = await rq.get("tx-B")
+        assert entry.attempts == 0
+
+        probe_calls = []
+        async def fake_find(**kwargs):
+            probe_calls.append(kwargs)
+            return None
+        monkeypatch.setattr(worker_module, "find_existing_refund_tx", fake_find)
+
+        send_calls = []
+        async def fake_refund_user(**kwargs):
+            send_calls.append(kwargs)
+            return "REFUND_TX_HASH"
+        monkeypatch.setattr(worker_module, "refund_user", fake_refund_user)
+
+        async def fake_balance_check(*a, **kw):
+            return True, ""
+        monkeypatch.setattr(worker_module, "_check_balance_for_refund", fake_balance_check)
+
+        app = SimpleNamespace(
+            refund_queue=rq,
+            tx_store=SimpleNamespace(is_processed=AsyncMock(return_value=False)),
+            settings=SimpleNamespace(
+                agent_wallet="EQagent", refund_max_attempts=10,
+                refund_fee_nanoton=500_000,
+            ),
+            sidecar_id="sid-test",
+            sender=None, _agent_jetton_wallet=None, verifier=None,
+            testnet=False,
+        )
+
+        await _process_entry(app, entry)
+        assert probe_calls == [], "first attempt should not probe on-chain"
+        assert len(send_calls) == 1
+        final = await rq.get("tx-B")
+        assert final.status == "refunded"
+        assert final.refund_tx == "REFUND_TX_HASH"
+    finally:
+        await rq.close()
+
+
+async def test_recover_stale_refunding_marks_already_refunded(tmp_path, monkeypatch):
+    """Stale-refunding entry whose refund landed on-chain (crash between
+    send() and mark_refunded) must be marked 'refunded' on recovery, not
+    blindly reverted to 'pending' (which would trigger a double-send).
+    """
+    import api.domain.refund_worker as worker_module
+    from api.domain.refund_worker import _recover_stale_refunding
+    from contextlib import asynccontextmanager
+    import time
+    from payments import RefundQueue
+
+    rq = RefundQueue(str(tmp_path / "pr.db"))
+    await rq.init()
+    try:
+        await rq.enqueue(tx_hash="tx-C", nonce="n", rail="TON",
+                         sender="EQuser", amount=1_000_000, sku_id="s")
+        await rq.claim("tx-C")
+        await rq._conn.execute(
+            "UPDATE pending_refunds SET last_attempt_at = ? WHERE tx_hash = 'tx-C'",
+            (int(time.time()) - 3600,),
+        )
+        await rq._conn.commit()
+
+        @asynccontextmanager
+        async def fake_client_ctx(app):
+            yield object()
+
+        async def fake_find(**kwargs):
+            assert kwargs["original_tx_hash"] == "tx-C"
+            return "ONCHAIN_REFUND_HASH"
+
+        monkeypatch.setattr(worker_module, "_acquire_lite_client", fake_client_ctx)
+        monkeypatch.setattr(worker_module, "find_existing_refund_tx", fake_find)
+
+        app = SimpleNamespace(
+            refund_queue=rq, verifier=None, sidecar_id="sid-test",
+            settings=SimpleNamespace(agent_wallet="EQagent", testnet=False),
+        )
+        await _recover_stale_refunding(app, older_than_seconds=600)
+
+        final = await rq.get("tx-C")
+        assert final.status == "refunded"
+        assert final.refund_tx == "ONCHAIN_REFUND_HASH"
+    finally:
+        await rq.close()
+
+
+async def test_recover_stale_refunding_reverts_when_not_onchain(tmp_path, monkeypatch):
+    """If the probe finds no refund on-chain, the stale entry returns to
+    'pending' with a backoff so the worker retries it on the next tick."""
+    import api.domain.refund_worker as worker_module
+    from api.domain.refund_worker import _recover_stale_refunding
+    from contextlib import asynccontextmanager
+    import time
+    from payments import RefundQueue
+
+    rq = RefundQueue(str(tmp_path / "pr.db"))
+    await rq.init()
+    try:
+        await rq.enqueue(tx_hash="tx-D", nonce="n", rail="TON",
+                         sender="EQuser", amount=1_000_000, sku_id="s")
+        await rq.claim("tx-D")
+        await rq._conn.execute(
+            "UPDATE pending_refunds SET last_attempt_at = ? WHERE tx_hash = 'tx-D'",
+            (int(time.time()) - 3600,),
+        )
+        await rq._conn.commit()
+
+        @asynccontextmanager
+        async def fake_client_ctx(app):
+            yield object()
+        async def fake_find(**kwargs):
+            return None  # nothing on-chain
+        monkeypatch.setattr(worker_module, "_acquire_lite_client", fake_client_ctx)
+        monkeypatch.setattr(worker_module, "find_existing_refund_tx", fake_find)
+
+        app = SimpleNamespace(
+            refund_queue=rq, verifier=None, sidecar_id="sid-test",
+            settings=SimpleNamespace(agent_wallet="EQagent", testnet=False),
+        )
+        await _recover_stale_refunding(app, older_than_seconds=600)
+
+        final = await rq.get("tx-D")
+        assert final.status == "pending"
+        assert "stale" in (final.last_error or "")
+    finally:
+        await rq.close()
+
+
+async def test_find_existing_refund_tx_matches_ton_comment(tmp_path):
+    """Probe must recognize a refund_body in an outgoing TON internal msg
+    by matching (tx, sidecar_id) — reason and other fields are ignored."""
+    from unittest.mock import MagicMock
+    from api.domain.refund import find_existing_refund_tx
+    from transfer import refund_body
+
+    body = refund_body("paid-tx-hash", "out_of_stock", "sid-test")
+    # Fake out_msg/tx objects mirroring tonutils' shape: tx.out_msgs, msg.body,
+    # tx.cell.hash.hex().
+    msg = MagicMock(body=body)
+    tx = MagicMock(out_msgs=[msg])
+    tx.cell.hash.hex.return_value = "ONCHAIN_REFUND_HASH"
+    client = MagicMock()
+    async def fake_get_txs(addr, limit):
+        return [tx]
+    client.get_transactions = fake_get_txs
+
+    found = await find_existing_refund_tx(
+        client=client, agent_wallet="EQagent", rail="TON",
+        original_tx_hash="paid-tx-hash", sidecar_id="sid-test",
+    )
+    assert found == "ONCHAIN_REFUND_HASH"
+
+    not_found = await find_existing_refund_tx(
+        client=client, agent_wallet="EQagent", rail="TON",
+        original_tx_hash="different-tx", sidecar_id="sid-test",
+    )
+    assert not_found is None

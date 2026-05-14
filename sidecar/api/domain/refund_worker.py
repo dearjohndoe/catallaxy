@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, AsyncIterator
 
 from payments import PendingRefund
 
-from api.domain.refund import refund_user
+from api.domain.refund import find_existing_refund_tx, refund_user
 
 if TYPE_CHECKING:
     from api.app import SidecarApp
@@ -29,13 +30,10 @@ async def refund_worker_loop(app: "SidecarApp") -> None:
     Runs as a background task. Exits when ``app.stop_event`` is set.
     """
     interval = max(app.settings.refund_worker_interval, 5)
-    # Recover from a crash that left entries stuck in 'refunding'.
     try:
-        reverted = await app.refund_queue.revert_stale_refunding(older_than_seconds=600)
-        if reverted:
-            logger.warning("refund_worker: reverted %d stale 'refunding' entries on startup", reverted)
+        await _recover_stale_refunding(app, older_than_seconds=600)
     except Exception:
-        logger.exception("refund_worker: revert_stale_refunding failed")
+        logger.exception("refund_worker: stale recovery failed")
 
     while not app.stop_event.is_set():
         try:
@@ -47,6 +45,75 @@ async def refund_worker_loop(app: "SidecarApp") -> None:
             await _tick(app)
         except Exception:
             logger.exception("refund_worker tick failed")
+
+
+@contextlib.asynccontextmanager
+async def _acquire_lite_client(app: "SidecarApp") -> AsyncIterator[object]:
+    """Yield a LiteBalancer for on-chain probes. Reuses the TON verifier's
+    client when available, otherwise opens an ad-hoc one and closes it on exit.
+    """
+    if app.verifier is not None and app.verifier._client is not None:
+        yield app.verifier._client
+        return
+    from tonutils.clients import LiteBalancer
+    from tonutils.types import NetworkGlobalID
+    network = NetworkGlobalID.TESTNET if app.settings.testnet else NetworkGlobalID.MAINNET
+    client = LiteBalancer.from_network_config(network)
+    await client.connect()
+    try:
+        yield client
+    finally:
+        try:
+            await client.close()
+        except Exception:
+            pass
+
+
+async def _recover_stale_refunding(app: "SidecarApp", older_than_seconds: int) -> None:
+    """Resolve entries stuck in 'refunding' since before a crash/restart.
+
+    For each stale entry, probe the chain for a matching refund tx. If found,
+    the previous worker did send the refund — record the hash and finish.
+    Otherwise revert to 'pending' for retry. Replaces a blind revert that
+    could cause double-refunds.
+    """
+    stale = await app.refund_queue.list_stale_refunding(older_than_seconds)
+    if not stale:
+        return
+    logger.warning("refund_worker: recovering %d stale 'refunding' entries", len(stale))
+
+    async with _acquire_lite_client(app) as client:
+        for entry in stale:
+            try:
+                found = await find_existing_refund_tx(
+                    client=client,
+                    agent_wallet=app.settings.agent_wallet,
+                    rail=entry.rail,
+                    original_tx_hash=entry.tx_hash,
+                    sidecar_id=app.sidecar_id,
+                )
+            except Exception:
+                logger.exception(
+                    "refund_worker: probe failed during stale recovery tx=%s", entry.tx_hash,
+                )
+                found = None
+
+            if found:
+                await app.refund_queue.mark_refunded(entry.tx_hash, found)
+                logger.warning(
+                    "refund_worker: stale entry already refunded on-chain tx=%s refund_tx=%s",
+                    entry.tx_hash, found,
+                )
+            else:
+                await app.refund_queue.mark_failed_transient(
+                    entry.tx_hash,
+                    "recovered from stale 'refunding' (no on-chain refund found)",
+                    backoff_seconds=_backoff_for_attempt(entry.attempts),
+                )
+                logger.warning(
+                    "refund_worker: stale entry reverted to pending tx=%s attempts=%d",
+                    entry.tx_hash, entry.attempts,
+                )
 
 
 async def _tick(app: "SidecarApp") -> None:
@@ -79,6 +146,31 @@ async def _process_entry(app: "SidecarApp", entry: PendingRefund) -> None:
                 return
         except Exception:
             logger.exception("refund_worker: tx_store.is_processed check failed")
+
+    # Dedup-on-retry: if a prior attempt already sent a refund (e.g., crash
+    # between send() and mark_refunded()), pick up its on-chain hash instead
+    # of sending again. Skipped on the very first attempt — nothing to dedup
+    # against, and probing wastes one RPC per refund.
+    if entry.attempts >= 1 and entry.sender and entry.amount is not None:
+        try:
+            async with _acquire_lite_client(app) as client:
+                existing = await find_existing_refund_tx(
+                    client=client,
+                    agent_wallet=app.settings.agent_wallet,
+                    rail=entry.rail,
+                    original_tx_hash=entry.tx_hash,
+                    sidecar_id=app.sidecar_id,
+                )
+        except Exception:
+            logger.exception("refund_worker: pre-send dedup probe failed tx=%s", entry.tx_hash)
+            existing = None
+        if existing:
+            await app.refund_queue.mark_refunded(entry.tx_hash, existing)
+            logger.warning(
+                "refund_worker: refund already on-chain from prior attempt tx=%s refund_tx=%s",
+                entry.tx_hash, existing,
+            )
+            return
 
     # Permanent give-up after too many attempts. Ops can resurrect manually.
     if entry.attempts >= app.settings.refund_max_attempts:

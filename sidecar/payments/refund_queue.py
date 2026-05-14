@@ -261,28 +261,29 @@ class RefundQueue:
         )
         await self._conn.commit()
 
-    async def revert_stale_refunding(self, older_than_seconds: int = 600) -> int:
-        """Revert entries stuck in 'refunding' for too long back to 'pending'.
+    async def list_stale_refunding(
+        self, older_than_seconds: int = 600,
+    ) -> list[PendingRefund]:
+        """Return entries stuck in 'refunding' since before ``older_than_seconds``.
 
-        Called on startup to recover from a crash mid-refund. The worker will
-        retry; the worst case is a double-refund if the original send_jetton
-        actually completed, hence the recommended balance precheck below.
+        Caller (refund_worker) probes the chain for a matching refund tx and
+        decides whether to mark_refunded (already sent) or mark_failed_transient
+        (revert to pending for retry). Blind reverting could cause double-refunds.
         """
         if not self._conn:
             await self.init()
         cutoff = int(time.time()) - older_than_seconds
-        cur = await self._conn.execute(
+        async with self._conn.execute(
             """
-            UPDATE pending_refunds
-               SET status = 'pending',
-                   last_error = COALESCE(last_error, '') ||
-                                ' [recovered from stale refunding]',
-                   next_attempt_at = ?
+            SELECT tx_hash, nonce, rail, sender, amount, sku_id, status,
+                   refund_tx, attempts, last_error, created_at,
+                   last_attempt_at, next_attempt_at, force_refund
+              FROM pending_refunds
              WHERE status = 'refunding'
                AND last_attempt_at IS NOT NULL
                AND last_attempt_at < ?
             """,
-            (int(time.time()), cutoff),
-        )
-        await self._conn.commit()
-        return cur.rowcount
+            (cutoff,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [PendingRefund(*row) for row in rows]
