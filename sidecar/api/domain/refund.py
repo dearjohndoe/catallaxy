@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from jetton import USDT_REFUND_FEE
 from transfer import TransferSender, refund_body
+
+if TYPE_CHECKING:
+    from payments.refund_queue import RefundQueue
 
 logger = logging.getLogger("sidecar")
 
@@ -58,3 +62,49 @@ async def refund_user(
     except Exception:
         logger.exception("Failed to send refund")
         return None
+
+
+async def refund_or_enqueue(
+    *,
+    refund_queue: "RefundQueue",
+    refund_user_fn,
+    tx_hash: str,
+    nonce: str,
+    rail: str,
+    sender: str,
+    amount: int,
+    sku_id: str | None,
+    reason: str,
+) -> str | None:
+    """Direct refund attempt; on failure (None or exception), enqueue with force=True.
+
+    Used by paths where mark_processed already ran but service wasn't delivered
+    (runner failure, agent reported out_of_stock). The queue entry must bypass
+    the worker's is_processed race-guard, hence force_refund=True.
+    """
+    try:
+        refund_tx = await refund_user_fn(
+            recipient=sender,
+            payment_amount=amount,
+            original_tx_hash=tx_hash,
+            reason=reason,
+            rail=rail,
+        )
+    except Exception:
+        logger.exception("Direct refund raised tx=%s; falling back to queue", tx_hash)
+        refund_tx = None
+
+    if refund_tx:
+        return refund_tx
+
+    try:
+        await refund_queue.enqueue(
+            tx_hash=tx_hash, nonce=nonce, rail=rail,
+            sender=sender, amount=amount, sku_id=sku_id,
+            force_refund=True,
+        )
+    except Exception:
+        logger.exception(
+            "refund_queue.enqueue failed tx=%s — manual reconciliation needed", tx_hash,
+        )
+    return None

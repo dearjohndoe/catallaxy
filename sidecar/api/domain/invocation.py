@@ -3,11 +3,15 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import api  # late binding for monkeypatched run_agent_subprocess
+from api.domain.refund import refund_or_enqueue
 from api.domain.result_processing import is_out_of_stock_result
 from api.validation import validate_result_structure
+
+if TYPE_CHECKING:
+    from payments.refund_queue import RefundQueue
 
 logger = logging.getLogger("sidecar")
 
@@ -25,6 +29,7 @@ def _exc_to_reason_code(exc: BaseException) -> str:
 def create_runner(
     *,
     refund_user: Callable[..., Awaitable[str | None]],
+    refund_queue: "RefundQueue",
     stock,
     agent_command: str,
     final_timeout: int,
@@ -33,6 +38,8 @@ def create_runner(
     sender: str,
     amount: int,
     tx_hash: str,
+    nonce: str,
+    sku_id: str,
     uploaded_files: dict[str, Path] | None = None,
     rail: str = "TON",
     reservation_key: str | None = None,
@@ -53,12 +60,12 @@ def create_runner(
 
             if is_out_of_stock_result(raw):
                 reason = str(raw.get("reason") or "agent reported out of stock")
-                refund_tx = await refund_user(
-                    recipient=sender,
-                    payment_amount=amount,
-                    original_tx_hash=tx_hash,
+                refund_tx = await refund_or_enqueue(
+                    refund_queue=refund_queue,
+                    refund_user_fn=refund_user,
+                    tx_hash=tx_hash, nonce=nonce, rail=rail,
+                    sender=sender, amount=amount, sku_id=sku_id,
                     reason="out_of_stock",
-                    rail=rail,
                 )
                 if reservation_key:
                     try:
@@ -67,7 +74,7 @@ def create_runner(
                         logger.exception("agent_out_of_stock bookkeeping failed")
                 return {
                     "result": {
-                        "status": "refunded",
+                        "status": "refunded" if refund_tx else "refund_pending",
                         "reason_code": "out_of_stock",
                         "reason": reason,
                         "refund_tx": refund_tx,
@@ -85,17 +92,13 @@ def create_runner(
             reason_code = _exc_to_reason_code(exc)
             human_reason = str(exc) or reason_code
 
-            refund_tx: str | None = None
-            try:
-                refund_tx = await refund_user(
-                    recipient=sender,
-                    payment_amount=amount,
-                    original_tx_hash=tx_hash,
-                    reason=reason_code,
-                    rail=rail,
-                )
-            except Exception:
-                logger.exception("Refund sub-task failed inside runner")
+            refund_tx = await refund_or_enqueue(
+                refund_queue=refund_queue,
+                refund_user_fn=refund_user,
+                tx_hash=tx_hash, nonce=nonce, rail=rail,
+                sender=sender, amount=amount, sku_id=sku_id,
+                reason=reason_code,
+            )
             if reservation_key:
                 try:
                     await stock.release(reservation_key)
@@ -111,7 +114,18 @@ def create_runner(
                         "refund_tx": refund_tx,
                     }
                 }
-            raise
+            # Direct refund failed, but the queue has it now (force_refund=True).
+            # Return a deterministic refund_pending result instead of raising —
+            # raising would make jobs mark this 'error', hiding the queued refund
+            # from the caller.
+            return {
+                "result": {
+                    "status": "refund_pending",
+                    "reason_code": reason_code,
+                    "reason": human_reason,
+                    "refund_tx": None,
+                }
+            }
         finally:
             if uploaded_files:
                 for file_path in uploaded_files.values():

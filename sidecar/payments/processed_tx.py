@@ -18,6 +18,11 @@ class ProcessedTxStore:
 
     async def init(self) -> None:
         self._conn = await aiosqlite.connect(self._path)
+        # WAL: readers don't block writers; busy_timeout: wait up to 15s for
+        # the writer lock before failing. Required because /invoke and the
+        # 30-day cleanup task both write here, and refund_worker reads.
+        await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.execute("PRAGMA busy_timeout=15000")
         await self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS processed_txs (

@@ -545,20 +545,33 @@ async def test_invoke_payment_verification_error_returns_402(client):
     assert data["error"] == "bad"
 
 
-async def test_invoke_payment_verification_unexpected_returns_502(client):
+async def test_invoke_payment_verification_unexpected_enqueues_refund(client):
+    """When the verifier raises an unknown exception (not PaymentVerificationError),
+    we can't tell if the tx is real. The handler enqueues a refund and returns
+    503 refund_pending so the worker can recover via the monitor."""
     app: SidecarApp = client.sidecar
-    app.tx_store.is_processed = AsyncMock(return_value=False)
-    app.verifier.verify = AsyncMock(side_effect=RuntimeError("rpc down"))
-    resp = await client.post(
-        "/invoke",
-        json={
-            "capability": "translate",
-            "tx": "txh",
-            "nonce": "n:sid-test",
-            "body": {"text": "hi"},
-        },
-    )
-    assert resp.status == 502
+    await app.refund_queue.init()
+    try:
+        app.tx_store.is_processed = AsyncMock(return_value=False)
+        app.verifier.verify = AsyncMock(side_effect=RuntimeError("rpc down"))
+        resp = await client.post(
+            "/invoke",
+            json={
+                "capability": "translate",
+                "tx": "txh",
+                "nonce": "n:sid-test",
+                "body": {"text": "hi"},
+            },
+        )
+        assert resp.status == 503
+        data = await resp.json()
+        assert data["refund_pending"] is True
+        entry = await app.refund_queue.get("txh")
+        assert entry is not None
+        assert entry.status == "pending"
+        assert entry.force_refund == 0  # pre-verify, not a force case
+    finally:
+        await app.refund_queue.close()
 
 
 async def test_invoke_happy_path_runs_agent_and_returns_done(client, monkeypatch):

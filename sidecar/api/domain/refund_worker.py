@@ -65,17 +65,20 @@ async def _tick(app: "SidecarApp") -> None:
 async def _process_entry(app: "SidecarApp", entry: PendingRefund) -> None:
     """Resolve, claim, and refund a single pending entry."""
     # Race-guard: if the same tx already succeeded via /invoke after enqueue,
-    # don't refund — mark as processed and skip.
-    try:
-        if await app.tx_store.is_processed(entry.tx_hash):
-            await app.refund_queue.mark_processed(entry.tx_hash)
-            logger.info(
-                "refund_worker: tx already processed, skipping refund tx=%s",
-                entry.tx_hash,
-            )
-            return
-    except Exception:
-        logger.exception("refund_worker: tx_store.is_processed check failed")
+    # don't refund — mark as processed and skip. Skip the guard when
+    # ``force_refund`` is set: those entries come from paths where
+    # mark_processed already ran but service was NOT delivered.
+    if not entry.force_refund:
+        try:
+            if await app.tx_store.is_processed(entry.tx_hash):
+                await app.refund_queue.mark_processed(entry.tx_hash)
+                logger.info(
+                    "refund_worker: tx already processed, skipping refund tx=%s",
+                    entry.tx_hash,
+                )
+                return
+        except Exception:
+            logger.exception("refund_worker: tx_store.is_processed check failed")
 
     # Permanent give-up after too many attempts. Ops can resurrect manually.
     if entry.attempts >= app.settings.refund_max_attempts:

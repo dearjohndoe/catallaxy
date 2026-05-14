@@ -24,6 +24,52 @@ def unlock_quote(quote_id: str | None, sidecar: "SidecarApp") -> None:
         sidecar.quotes[quote_id].locked = False
 
 
+async def enqueue_refund_after_payment(
+    *,
+    sidecar: "SidecarApp",
+    parsed: "ParsedInvoke",
+    sku: AgentSku,
+    sender: str | None,
+    amount: int | None,
+    reason: str,
+    force: bool = False,
+) -> web.Response:
+    """Enqueue a tx for background refund and return a 503 refund_pending response.
+
+    Used for every post-tx-submission failure where direct refund is unsafe or
+    unavailable. The background worker handles retry with backoff. ``force=True``
+    bypasses the worker's is_processed race-guard — set it whenever
+    ``mark_processed`` has already run but service was NOT delivered.
+    """
+    unlock_quote(parsed.quote_id, sidecar)
+    try:
+        await sidecar.refund_queue.enqueue(
+            tx_hash=parsed.tx_hash,
+            nonce=parsed.nonce,
+            rail=parsed.rail,
+            sender=sender,
+            amount=amount,
+            sku_id=sku.sku_id,
+            force_refund=force,
+        )
+    except Exception:
+        # Last resort: queue itself unavailable. Log loudly — ops must reconcile
+        # manually. We still return refund_pending so the caller doesn't retry
+        # the /invoke and burn more state.
+        logger.exception(
+            "refund_queue.enqueue failed tx=%s nonce=%s — manual reconciliation needed",
+            parsed.tx_hash, parsed.nonce,
+        )
+    return web.json_response(
+        {
+            "error": f"Internal sidecar error ({reason}); payment queued for refund",
+            "refund_pending": True,
+            "tx": parsed.tx_hash,
+        },
+        status=503,
+    )
+
+
 async def build_402_response(
     parsed: "ParsedInvoke",
     sku: AgentSku,
@@ -114,30 +160,49 @@ async def verify_payment(
                         status=503,
                     )
             if min_usdt == 0:
-                unlock_quote(parsed.quote_id, sidecar)
-                return web.json_response(
-                    {"error": "USDT price unavailable for this SKU", "sku": sku.sku_id},
-                    status=503,
+                # Dynamic-price SKU and price fetch failed. The user already
+                # submitted a tx, so we don't know if it's real until the
+                # worker recovers sender/amount from the monitor.
+                logger.warning(
+                    "USDT price unavailable for SKU %s — queueing tx %s for refund",
+                    sku.sku_id, parsed.tx_hash,
+                )
+                return await enqueue_refund_after_payment(
+                    sidecar=sidecar, parsed=parsed, sku=sku,
+                    sender=None, amount=None,
+                    reason="usdt_price_unavailable",
                 )
             return await sidecar.jetton_verifier.verify(
                 tx_hash=parsed.tx_hash, raw_nonce=parsed.nonce, min_amount=min_usdt,
             )
         if min_ton == 0:
-            unlock_quote(parsed.quote_id, sidecar)
-            return web.json_response(
-                {"error": "TON price unavailable for this SKU", "sku": sku.sku_id},
-                status=503,
+            logger.warning(
+                "TON price unavailable for SKU %s — queueing tx %s for refund",
+                sku.sku_id, parsed.tx_hash,
+            )
+            return await enqueue_refund_after_payment(
+                sidecar=sidecar, parsed=parsed, sku=sku,
+                sender=None, amount=None,
+                reason="ton_price_unavailable",
             )
         return await sidecar.verifier.verify(
             tx_hash=parsed.tx_hash, raw_nonce=parsed.nonce, min_amount=min_ton,
         )
     except PaymentVerificationError as exc:
+        # Verifier saw on-chain state and rejected: tx not found, wrong amount,
+        # wrong recipient. Money may not exist — don't refund, let user fix.
         unlock_quote(parsed.quote_id, sidecar)
         return web.json_response({"error": str(exc)}, status=402)
     except Exception:
-        logger.exception("Payment verification error")
-        unlock_quote(parsed.quote_id, sidecar)
-        return web.json_response({"error": "Payment verification failed"}, status=502)
+        # Unknown verifier error (RPC blip, parsing bug, etc.). We can't tell
+        # whether the tx is real. Worker's _recover_payment_info will check
+        # the monitor and either refund or mark failed.
+        logger.exception("Payment verification error tx=%s", parsed.tx_hash)
+        return await enqueue_refund_after_payment(
+            sidecar=sidecar, parsed=parsed, sku=sku,
+            sender=None, amount=None,
+            reason="verifier_error",
+        )
 
 
 async def claim_stock(
@@ -166,8 +231,13 @@ async def claim_stock(
         reserved = False
     if not reserved:
         # Race lost between preflight and payment. Refund the user.
+        # ``mark_processed`` already ran by the time we get here, so any
+        # fallback enqueue must set force_refund=True (otherwise the worker's
+        # is_processed race-guard would skip it).
+        refund_tx: str | None = None
+        refund_send_failed = False
         try:
-            await sidecar.refund_user(
+            refund_tx = await sidecar.refund_user(
                 recipient=verified_payment.sender,
                 payment_amount=verified_payment.amount,
                 original_tx_hash=verified_payment.tx_hash,
@@ -176,8 +246,26 @@ async def claim_stock(
             )
         except Exception:
             logger.exception("Refund after out_of_stock race failed")
-        return None, created, web.json_response(
-            {"error": "out_of_stock", "sku": sku.sku_id, "refunded": True}, status=409,
+            refund_send_failed = True
+
+        if refund_tx:
+            return None, created, web.json_response(
+                {"error": "out_of_stock", "sku": sku.sku_id,
+                 "refunded": True, "refund_tx": refund_tx},
+                status=409,
+            )
+
+        # Direct send returned None or raised. Queue for the worker to retry.
+        logger.warning(
+            "Direct refund failed after OOS race tx=%s; queueing for background retry "
+            "(send_failed=%s)",
+            verified_payment.tx_hash, refund_send_failed,
+        )
+        return None, created, await enqueue_refund_after_payment(
+            sidecar=sidecar, parsed=parsed, sku=sku,
+            sender=verified_payment.sender, amount=verified_payment.amount,
+            reason="out_of_stock_refund_send_failed",
+            force=True,
         )
     created.append(reservation_key)
     return reservation_key, created, None

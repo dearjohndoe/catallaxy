@@ -801,3 +801,172 @@ async def test_refund_queue_state_machine(tmp_path):
         assert not await rq.claim("t1")
     finally:
         await rq.close()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# BUG 11 — Post-verify failures must always refund (no silent 500s)
+# ────────────────────────────────────────────────────────────────────────
+
+async def _build_post_verify_app(tmp_path, monkeypatch):
+    """App configured so /invoke reaches the post-verify code path with a
+    successfully verified payment. Caller mutates tx_store/jobs/stock to
+    inject the specific failure mode under test."""
+    from aiohttp.test_utils import TestClient, TestServer
+    sku = AgentSku(
+        sku_id=DEFAULT_SKU_ID, title=DEFAULT_SKU_ID,
+        price_ton=1_000_000, price_usd=None, initial_stock=None,
+    )
+    settings = _make_settings(
+        tmp_path, skus=(sku,),
+        agent_price=1_000_000, payment_rails=("TON",),
+    )
+    app = SidecarApp(settings)
+    app.sidecar_id = "sid-test"
+    app.args_schema = {"text": {"type": "string", "required": True}}
+    app._file_store_dir.mkdir(parents=True, exist_ok=True)
+    app.verifier.verify = AsyncMock(return_value=VerifiedPayment(
+        tx_hash="real-hash", sender="EQsender", recipient="EQagent",
+        amount=1_000_000, comment="n:sid-test",
+    ))
+    app.tx_store.is_processed = AsyncMock(return_value=False)
+
+    async def fake_startup():
+        app._file_store_dir.mkdir(parents=True, exist_ok=True)
+        await app.stock.init(app.settings.skus)
+        await app.refund_queue.init()
+
+    async def fake_shutdown():
+        await app.refund_queue.close()
+        await app.tx_store.close()
+        await app.stock.close()
+
+    app.startup = fake_startup  # type: ignore[method-assign]
+    app.shutdown = fake_shutdown  # type: ignore[method-assign]
+    web_app = app.build_web_app()
+    web_app.on_startup.clear()
+    web_app.on_shutdown.clear()
+    web_app.on_startup.append(lambda _: fake_startup())
+    web_app.on_shutdown.append(lambda _: fake_shutdown())
+    return app, TestClient(TestServer(web_app))
+
+
+async def test_mark_processed_failure_after_verify_enqueues_refund(tmp_path, monkeypatch):
+    """When tx_store.mark_processed raises a non-IntegrityError (e.g. SQLite
+    locked beyond busy_timeout, disk full, corruption), money was already
+    verified — handler MUST enqueue a refund instead of returning bare 500.
+    """
+    app, tc = await _build_post_verify_app(tmp_path, monkeypatch)
+    async with tc as c:
+        app.tx_store.mark_processed = AsyncMock(
+            side_effect=RuntimeError("simulated disk failure")
+        )
+        resp = await c.post("/invoke", json={
+            "capability": "translate", "tx": "real-hash",
+            "nonce": "n:sid-test", "body": {"text": "hi"},
+        })
+        assert resp.status == 503
+        data = await resp.json()
+        assert data["refund_pending"] is True
+        entry = await app.refund_queue.get("real-hash")
+        assert entry is not None
+        assert entry.status == "pending"
+        assert entry.sender == "EQsender"
+        assert entry.amount == 1_000_000
+        # No force_refund — mark_processed never succeeded so the worker's
+        # is_processed race-guard is safe.
+        assert entry.force_refund == 0
+
+
+async def test_mark_processed_integrity_error_returns_409_no_refund(tmp_path, monkeypatch):
+    """Parallel /invoke for the same tx_hash: one wins the PRIMARY KEY race,
+    the other gets IntegrityError. Loser must return 409 and MUST NOT enqueue
+    refund — the winner is delivering service for this payment.
+    """
+    import aiosqlite
+    app, tc = await _build_post_verify_app(tmp_path, monkeypatch)
+    async with tc as c:
+        app.tx_store.mark_processed = AsyncMock(
+            side_effect=aiosqlite.IntegrityError("UNIQUE constraint failed")
+        )
+        resp = await c.post("/invoke", json={
+            "capability": "translate", "tx": "real-hash",
+            "nonce": "n:sid-test", "body": {"text": "hi"},
+        })
+        assert resp.status == 409
+        data = await resp.json()
+        assert data["error"] == "Transaction already used"
+        # Queue must be untouched.
+        entry = await app.refund_queue.get("real-hash")
+        assert entry is None
+
+
+async def test_jobs_submit_failure_enqueues_refund_with_force(tmp_path, monkeypatch):
+    """If jobs.submit raises after mark_processed succeeded, the worker's
+    is_processed race-guard would skip the refund. The handler MUST set
+    force_refund=True so the worker proceeds anyway.
+    """
+    app, tc = await _build_post_verify_app(tmp_path, monkeypatch)
+    async with tc as c:
+        app.tx_store.mark_processed = AsyncMock()  # succeeds
+        app.tx_store.is_processed = AsyncMock(return_value=False)
+        app.jobs.submit = AsyncMock(side_effect=RuntimeError("job system down"))
+        resp = await c.post("/invoke", json={
+            "capability": "translate", "tx": "real-hash",
+            "nonce": "n:sid-test", "body": {"text": "hi"},
+        })
+        assert resp.status == 503
+        data = await resp.json()
+        assert data["refund_pending"] is True
+        entry = await app.refund_queue.get("real-hash")
+        assert entry is not None
+        assert entry.force_refund == 1, (
+            "mark_processed already ran — worker must bypass is_processed guard"
+        )
+
+
+async def test_refund_worker_force_refund_bypasses_is_processed_guard(tmp_path):
+    """Worker race-guard: with force_refund=1, skip the is_processed check and
+    refund the user even though the tx was marked processed.
+    """
+    from payments import RefundQueue, ProcessedTxStore
+    rq = RefundQueue(str(tmp_path / "pr.db"))
+    txs = ProcessedTxStore(str(tmp_path / "tx.db"))
+    await rq.init()
+    await txs.init()
+    try:
+        await txs.mark_processed("forced-tx")
+        await rq.enqueue(
+            tx_hash="forced-tx", nonce="n", rail="TON",
+            sender="EQsender", amount=1_000_000, sku_id="s1",
+            force_refund=True,
+        )
+        entry = await rq.get("forced-tx")
+        assert entry is not None
+        assert entry.force_refund == 1
+        # Sanity: a plain entry would be skipped by the guard.
+        await rq.enqueue(
+            tx_hash="normal-tx", nonce="n", rail="TON",
+            sender="EQsender", amount=1_000_000, sku_id="s1",
+        )
+        normal = await rq.get("normal-tx")
+        assert normal.force_refund == 0
+    finally:
+        await rq.close()
+        await txs.close()
+
+
+async def test_processed_tx_store_uses_wal_and_busy_timeout(tmp_path):
+    """Sanity check: WAL + busy_timeout=15s are applied on init."""
+    import aiosqlite
+    from payments import ProcessedTxStore
+    store = ProcessedTxStore(str(tmp_path / "tx.db"))
+    await store.init()
+    try:
+        async with store._conn.execute("PRAGMA journal_mode") as cur:
+            row = await cur.fetchone()
+        assert row[0].lower() == "wal"
+        async with store._conn.execute("PRAGMA busy_timeout") as cur:
+            row = await cur.fetchone()
+        assert row[0] == 15000
+    finally:
+        await store.close()

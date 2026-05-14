@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import aiosqlite
 from aiohttp import web
 
 from payments import parse_nonce
@@ -20,6 +21,7 @@ from api.http.handlers._invoke_helpers import (
     build_402_response,
     build_agent_payload,
     claim_stock,
+    enqueue_refund_after_payment,
     unlock_quote,
     verify_payment,
     wait_and_render,
@@ -205,15 +207,41 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
         if isinstance(verified, web.Response):
             return verified
 
-        if await sidecar.tx_store.is_processed(verified.tx_hash):
+        try:
+            already = await sidecar.tx_store.is_processed(verified.tx_hash)
+        except Exception:
+            # Money is verified but we can't query tx_store. Don't risk
+            # double-processing on retry; let the worker refund.
+            logger.exception(
+                "tx_store.is_processed failed after verify tx=%s", verified.tx_hash,
+            )
+            return await enqueue_refund_after_payment(
+                sidecar=sidecar, parsed=parsed, sku=sku,
+                sender=verified.sender, amount=verified.amount,
+                reason="tx_store_unavailable",
+            )
+        if already:
             unlock_quote(parsed.quote_id, sidecar)
             return web.json_response({"error": "Transaction already used"}, status=409)
 
         try:
             await sidecar.tx_store.mark_processed(verified.tx_hash)
-        except Exception:
+        except aiosqlite.IntegrityError:
+            # A parallel /invoke for the same tx won the PRIMARY KEY race.
+            # That request owns the service delivery; we just bow out.
             unlock_quote(parsed.quote_id, sidecar)
-            return web.json_response({"error": "Failed to persist transaction"}, status=500)
+            return web.json_response({"error": "Transaction already used"}, status=409)
+        except Exception:
+            # SQLite write failed (disk full, lock contention beyond 15s, etc.).
+            # Money is in but we can't record it. Queue for refund.
+            logger.exception(
+                "tx_store.mark_processed failed after verify tx=%s", verified.tx_hash,
+            )
+            return await enqueue_refund_after_payment(
+                sidecar=sidecar, parsed=parsed, sku=sku,
+                sender=verified.sender, amount=verified.amount,
+                reason="mark_processed_failed",
+            )
 
         reservation_key, created_reservation_keys, stock_err = await claim_stock(parsed, sku, sidecar, verified)
         if stock_err is not None:
@@ -224,11 +252,9 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
 
         agent_payload = build_agent_payload(parsed, sku)
 
-        # Runner takes ownership of uploaded_files and the reservation; outer
-        # finally must not double-clean.
-        ownership_transferred = True
         runner = create_runner(
             refund_user=sidecar.refund_user,
+            refund_queue=sidecar.refund_queue,
             stock=sidecar.stock,
             agent_command=sidecar.settings.agent_command,
             final_timeout=sidecar.settings.final_timeout,
@@ -237,11 +263,29 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
             sender=verified.sender,
             amount=verified.amount,
             tx_hash=parsed.tx_hash,
+            nonce=parsed.nonce,
+            sku_id=sku.sku_id,
             uploaded_files=uploaded_files,
             rail=parsed.rail,
             reservation_key=reservation_key,
         )
-        job_id = await sidecar.jobs.submit(runner)
+        try:
+            job_id = await sidecar.jobs.submit(runner)
+        except Exception:
+            # Runner never started — mark_processed already ran, so the worker
+            # must refund with force=True to bypass the is_processed guard.
+            logger.exception(
+                "jobs.submit failed after mark_processed tx=%s", verified.tx_hash,
+            )
+            return await enqueue_refund_after_payment(
+                sidecar=sidecar, parsed=parsed, sku=sku,
+                sender=verified.sender, amount=verified.amount,
+                reason="job_submit_failed",
+                force=True,
+            )
+        # Runner now owns uploaded_files and the reservation; outer finally
+        # must not double-clean.
+        ownership_transferred = True
         if reservation_key:
             try:
                 await sidecar.stock.attach_job(

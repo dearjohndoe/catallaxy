@@ -66,6 +66,7 @@ class StockStore:
     async def init(self, skus: Iterable[AgentSku]) -> None:
         self._conn = await aiosqlite.connect(self._path)
         await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.execute("PRAGMA busy_timeout=15000")
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.executescript(
             """
