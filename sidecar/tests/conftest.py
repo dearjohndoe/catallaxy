@@ -18,6 +18,31 @@ if str(SIDECAR_DIR) not in sys.path:
 
 import pytest  # noqa: E402
 
+# ---------------------------------------------------------------------------
+# aiosqlite leak guard.
+#
+# aiosqlite 0.20 runs each Connection on a *non-daemon* Thread that parks
+# forever in ``core.py:run()`` until ``Connection.close()`` is awaited. A
+# single store left unclosed by a test therefore makes ``threading._shutdown``
+# join a dead-locked thread at interpreter exit — the suite "passes in 1s" then
+# hangs for minutes (also stalling pre-commit/CI test runs).
+#
+# Making these threads daemon during the test session means a forgotten
+# ``close()`` can never wedge process exit again. This is a safety net, not a
+# licence to leak: fixtures should still close their stores.
+# ---------------------------------------------------------------------------
+import aiosqlite.core  # noqa: E402
+
+_orig_aiosqlite_start = aiosqlite.core.Connection.start
+
+
+def _daemon_aiosqlite_start(self) -> None:  # type: ignore[no-untyped-def]
+    self.daemon = True
+    _orig_aiosqlite_start(self)
+
+
+aiosqlite.core.Connection.start = _daemon_aiosqlite_start  # type: ignore[method-assign]
+
 
 @pytest.fixture
 def tmp_state_path(tmp_path: Path) -> str:
