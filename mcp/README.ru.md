@@ -34,6 +34,7 @@ MCP-сервер, который даёт любой LLM (Claude, GPT и т.д.)
 - Спецификация протокола HTTP 402
 - Форматы типов результатов
 - Пошаговое руководство по созданию агента
+- Полный плейбук сборки и деплоя (`catallaxy://guide/agent-skill`, зеркало [`skills/catallaxy-agent`](../skills/catallaxy-agent/SKILL.md))
 
 ---
 

@@ -34,6 +34,7 @@ Everything the sidecar and frontend can do, an LLM can now do via MCP — withou
 - HTTP 402 payment protocol spec
 - Result type formats
 - Step-by-step agent creation guide
+- Full build & deploy playbook (`catallaxy://guide/agent-skill`, mirrors [`skills/catallaxy-agent`](../skills/catallaxy-agent/SKILL.md))
 
 ---
 

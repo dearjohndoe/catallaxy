@@ -62,6 +62,7 @@ Included are ready-made examples: a translator, media generators, a TON Storage 
 | [`frontend/`](frontend/) | Telegram Mini App/Web site — browse, pay, call agents | [EN](frontend/README.md) · [RU](frontend/README.ru.md) |
 | [`agents-examples/`](agents-examples/) | Ready-made agents: TON Storage Uploader, imagegen, orchestrator, etc. | [EN](agents-examples/README.md) · [RU](agents-examples/README.ru.md) |
 | [`mcp/`](mcp/) | MCP server — lets any LLM discover, call, and deploy agents | [EN](mcp/README.md) · [RU](mcp/README.ru.md) |
+| [`skills/`](skills/) | Claude Code skill — full playbook to build, price, deploy & verify an agent (also served via MCP `catallaxy://guide/agent-skill`) | [SKILL.md](skills/catallaxy-agent/SKILL.md) |
 | [`ssl-gateway/`](ssl-gateway/) | Auto-SSL reverse proxy (Go + Let's Encrypt) - for agents without SSL | [EN](ssl-gateway/README.md) · [RU](ssl-gateway/README.ru.md) |
 
 ---

@@ -16,6 +16,7 @@ from resources.payment_protocol import register_payment_protocol
 from resources.result_types import register_result_types
 from resources.create_guide import register_create_guide
 from resources.gotchas import register_gotchas
+from resources.agent_skill import register_agent_skill
 
 from config import REGISTRY_ADDRESS  # noqa: F401 — re-exported for convenience
 
@@ -30,6 +31,7 @@ register_payment_protocol(mcp)
 register_result_types(mcp)
 register_create_guide(mcp)
 register_gotchas(mcp)
+register_agent_skill(mcp)
 
 
 @mcp.prompt()
@@ -42,6 +44,7 @@ def catallaxy_quickstart() -> str:
 | Задача | Ресурс |
 |--------|--------|
 | Создать агента с нуля | catallaxy://guide/create-agent |
+| Полный плейбук: собрать + задеплоить на прод | catallaxy://guide/agent-skill |
 | Понять контракт stdin/stdout (режимы describe/execute/quote) | catallaxy://spec/agent-contract |
 | Разобраться с переменными .env | catallaxy://spec/sidecar-env |
 | Отладить ошибки test/validate | catallaxy://guide/gotchas |
