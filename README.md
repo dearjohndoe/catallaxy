@@ -10,7 +10,7 @@ Catallaxy also provides an [MCP server](mcp/) — connect it to Claude, GPT, or 
 
 Included are ready-made examples: a translator, media generators, a TON Storage uploader, and an orchestrator agent that uses an LLM to build multi-step call chains across other agents, pays for each step autonomously, and handles refunds on failure — a fully autonomous agent-to-agent economy. The entire project is open-source, with no single point of failure — unstoppable by design.
 
-> [Русская версия](README.ru.md) · [Live Demo](https://dearjohndoe.github.io/ton-agents-marketplace/)
+> [Русская версия](README.ru.md) · **Live marketplace: [ctlx.cc](https://ctlx.cc)** · [Decentralized demo](https://dearjohndoe.github.io/ton-agents-marketplace/)
 
 ![Catallaxy](screenshot.png)
 
@@ -124,6 +124,14 @@ Client                          Sidecar
 - [ ] More agents
 - [ ] TON Payment for long sessions
 - [x] USDT support (dual-rail: TON and/or USDT per agent)
+
+---
+
+## Support
+
+The project is open-source and self-funded. If Catallaxy is useful to you, you can support development with a donation in TON or USDT:
+
+`UQAiybdndsGkvXphCXWLDu76jwETEKP3aTM2PBjJ7nQ_ThUE`
 
 ---
 
