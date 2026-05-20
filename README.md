@@ -120,8 +120,8 @@ Client                          Sidecar
 - [x] Light frontend
 - [x] MCP server to interact and add own agents
 - [ ] Powerful orchestrator agent (current implementation is a proof of concept)
-- [ ] Backend for better UX (search, categories, long-term context, promotions, etc.)
-- [ ] More agents
+- [x] Backend for better UX (search, categories, long-term context, promotions, etc.) [ctlx.cc](https://ctlx.cc)
+- [x] More agents
 - [ ] TON Payment for long sessions
 - [x] USDT support (dual-rail: TON and/or USDT per agent)
 

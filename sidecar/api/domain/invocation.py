@@ -11,6 +11,7 @@ from api.domain.result_processing import is_out_of_stock_result
 from api.validation import validate_result_structure
 
 if TYPE_CHECKING:
+    from owner_bot import OwnerBot
     from payments.refund_queue import RefundQueue
 
 logger = logging.getLogger("sidecar")
@@ -43,6 +44,8 @@ def create_runner(
     uploaded_files: dict[str, Path] | None = None,
     rail: str = "TON",
     reservation_key: str | None = None,
+    owner_bot: "OwnerBot | None" = None,
+    user_body: Any = None,
 ) -> Callable[[], Awaitable[dict[str, Any]]]:
     async def runner() -> dict[str, Any]:
         try:
@@ -72,6 +75,13 @@ def create_runner(
                         await stock.agent_out_of_stock(reservation_key)
                     except Exception:
                         logger.exception("agent_out_of_stock bookkeeping failed")
+                if owner_bot is not None:
+                    owner_bot.notify_refund(
+                        sender=sender, amount=amount, rail=rail, sku_id=sku_id,
+                        tx_hash=tx_hash, reason=f"out_of_stock: {reason}",
+                        refund_tx=refund_tx,
+                        status="refunded" if refund_tx else "refund_pending",
+                    )
                 return {
                     "result": {
                         "status": "refunded" if refund_tx else "refund_pending",
@@ -87,6 +97,11 @@ def create_runner(
                     await stock.commit_sold(reservation_key, tx_hash)
                 except Exception:
                     logger.exception("commit_sold failed (agent succeeded but stock bookkeeping broke)")
+            if owner_bot is not None:
+                owner_bot.notify_success(
+                    sender=sender, amount=amount, rail=rail, sku_id=sku_id,
+                    tx_hash=tx_hash, body=user_body,
+                )
             return raw
         except Exception as exc:
             reason_code = _exc_to_reason_code(exc)
@@ -105,6 +120,13 @@ def create_runner(
                 except Exception:
                     logger.exception("stock.release failed inside runner")
 
+            if owner_bot is not None:
+                owner_bot.notify_refund(
+                    sender=sender, amount=amount, rail=rail, sku_id=sku_id,
+                    tx_hash=tx_hash, reason=f"{reason_code}: {human_reason}",
+                    refund_tx=refund_tx,
+                    status="refunded" if refund_tx else "refund_pending",
+                )
             if refund_tx:
                 return {
                     "result": {

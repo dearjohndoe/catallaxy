@@ -6,6 +6,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from heartbeat import HeartbeatConfig, HeartbeatManager
+from owner_bot import OwnerBot
 
 from api.constants import DESCRIBE_TIMEOUT
 from api.describe import fetch_describe
@@ -86,16 +87,33 @@ async def startup(app: "SidecarApp") -> None:
     except Exception:
         logger.exception("RefundQueue.init failed")
 
+    if app.settings.tg_bot_token and app.settings.tg_user_ids:
+        app.owner_bot = OwnerBot(
+            token=app.settings.tg_bot_token,
+            user_ids=app.settings.tg_user_ids,
+            agent_name=app.settings.agent_name,
+            agent_description=app.settings.agent_description,
+            testnet=app.settings.testnet,
+            sidecar_id=app.sidecar_id,
+        )
+        try:
+            await app.owner_bot.setup()
+        except Exception:
+            logger.exception("OwnerBot.setup failed")
+
     try:
         await app.heartbeat.send_if_needed(force=False)
     except Exception:
         logger.exception("Initial heartbeat failed")
 
-    for task_coro in [
+    task_coros = [
         app.heartbeat.loop(app.stop_event),
         app.cleanup_loop(),
         refund_worker_loop(app),
-    ]:
+    ]
+    if app.owner_bot is not None:
+        task_coros.append(app.owner_bot.poll_loop(app.stop_event))
+    for task_coro in task_coros:
         task = asyncio.create_task(task_coro)
         task.add_done_callback(_silent_exception_handler)
         app.background_tasks.append(task)
@@ -113,3 +131,5 @@ async def shutdown(app: "SidecarApp") -> None:
     await app.tx_store.close()
     await app.stock.close()
     await app.refund_queue.close()
+    if app.owner_bot is not None:
+        await app.owner_bot.close()

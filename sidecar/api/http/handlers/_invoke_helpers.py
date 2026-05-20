@@ -60,6 +60,12 @@ async def enqueue_refund_after_payment(
             "refund_queue.enqueue failed tx=%s nonce=%s — manual reconciliation needed",
             parsed.tx_hash, parsed.nonce,
         )
+    if sidecar.owner_bot is not None:
+        sidecar.owner_bot.notify_refund(
+            sender=sender, amount=amount, rail=parsed.rail, sku_id=sku.sku_id,
+            tx_hash=parsed.tx_hash, reason=reason, refund_tx=None,
+            status="refund_pending",
+        )
     return web.json_response(
         {
             "error": f"Internal sidecar error ({reason}); payment queued for refund",
@@ -151,6 +157,12 @@ async def verify_payment(
                         "queued for background refund tx=%s nonce=%s",
                         parsed.tx_hash, parsed.nonce,
                     )
+                    if sidecar.owner_bot is not None:
+                        sidecar.owner_bot.notify_refund(
+                            sender=None, amount=None, rail="USDT", sku_id=sku.sku_id,
+                            tx_hash=parsed.tx_hash, reason="usdt_verifier_unavailable",
+                            refund_tx=None, status="refund_pending",
+                        )
                     return web.json_response(
                         {
                             "error": "USDT verifier temporarily unavailable; payment queued for refund",
@@ -249,6 +261,13 @@ async def claim_stock(
             refund_send_failed = True
 
         if refund_tx:
+            if sidecar.owner_bot is not None:
+                sidecar.owner_bot.notify_refund(
+                    sender=verified_payment.sender, amount=verified_payment.amount,
+                    rail=parsed.rail, sku_id=sku.sku_id,
+                    tx_hash=verified_payment.tx_hash, reason="out_of_stock",
+                    refund_tx=refund_tx, status="refunded",
+                )
             return None, created, web.json_response(
                 {"error": "out_of_stock", "sku": sku.sku_id,
                  "refunded": True, "refund_tx": refund_tx},

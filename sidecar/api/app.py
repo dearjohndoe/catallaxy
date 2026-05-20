@@ -14,6 +14,7 @@ from storage import StateStore
 from transfer import TransferSender
 from payments import PaymentVerifier, JettonPaymentVerifier, ProcessedTxStore, RefundQueue
 from jetton import USDT_MASTER_MAINNET, USDT_MASTER_TESTNET
+from owner_bot import OwnerBot
 from settings import Settings, AgentSku, DEFAULT_SKU_ID  # noqa: F401 — re-exported via api package
 from stock import StockStore
 
@@ -90,6 +91,10 @@ class SidecarApp:
         self.quotes: dict[str, QuoteEntry] = {}
         # Rate Limiting state: ip -> list of timestamps
         self.rate_limits: dict[str, list[float]] = {}
+        # Optional owner-facing TG bot. Constructed in lifecycle.startup once
+        # sidecar_id is loaded — mirrors the heartbeat pattern above. Bot stays
+        # None when TG_BOT_TOKEN / TG_USER_ID_LIST aren't set.
+        self.owner_bot: OwnerBot | None = None
 
     async def refund_user(
         self, recipient: str, payment_amount: int, original_tx_hash: str, reason: str, rail: str = "TON",

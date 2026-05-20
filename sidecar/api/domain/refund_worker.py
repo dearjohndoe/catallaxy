@@ -182,6 +182,16 @@ async def _process_entry(app: "SidecarApp", entry: PendingRefund) -> None:
             "refund_worker: permanent failure tx=%s nonce=%s rail=%s — manual intervention required",
             entry.tx_hash, entry.nonce, entry.rail,
         )
+        if getattr(app, "owner_bot", None) is not None:
+            app.owner_bot.notify_refund(
+                sender=entry.sender, amount=entry.amount, rail=entry.rail,
+                sku_id=entry.sku_id, tx_hash=entry.tx_hash,
+                reason=(
+                    f"refund_failed_permanent (attempts={entry.attempts}): "
+                    f"{entry.last_error or 'n/a'}"
+                ),
+                refund_tx=None, status="refund_pending", delayed=True,
+            )
         return
 
     # If sender/amount unknown, try to recover from on-chain monitor.
@@ -243,6 +253,13 @@ async def _process_entry(app: "SidecarApp", entry: PendingRefund) -> None:
             "refund_worker: refund sent tx=%s refund_tx=%s rail=%s amount=%s recipient=%s",
             entry.tx_hash, refund_tx, entry.rail, entry.amount, entry.sender,
         )
+        if getattr(app, "owner_bot", None) is not None:
+            app.owner_bot.notify_refund(
+                sender=entry.sender, amount=entry.amount, rail=entry.rail,
+                sku_id=entry.sku_id, tx_hash=entry.tx_hash,
+                reason=f"queued_refund: {entry.last_error or 'retry success'}",
+                refund_tx=refund_tx, status="refunded", delayed=True,
+            )
     else:
         # refund_user returned None — usually amount-too-small-after-fee. Permanent.
         await app.refund_queue.mark_failed_permanent(

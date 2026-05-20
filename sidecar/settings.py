@@ -70,6 +70,8 @@ class Settings:
     owner_wallet: str | None
     skus: tuple[AgentSku, ...]
     payment_rails: tuple[str, ...]
+    tg_bot_token: str | None
+    tg_user_ids: tuple[int, ...]
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -124,6 +126,25 @@ def _parse_sku_prices(price_spec: list[str], sku_id: str) -> tuple[int | None, i
         raise RuntimeError(f"SKU '{sku_id}': at least one of ton/usd price required")
 
     return price_ton, price_usd
+
+
+def _parse_tg_user_ids(raw: str) -> tuple[int, ...]:
+    """Parse TG_USER_ID_LIST='12345,67890'. Skips blanks; raises on non-int tokens."""
+    ids: list[int] = []
+    seen: set[int] = set()
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            uid = int(chunk)
+        except ValueError:
+            raise RuntimeError(f"TG_USER_ID_LIST: invalid id '{chunk}' (must be integer)")
+        if uid in seen:
+            continue
+        seen.add(uid)
+        ids.append(uid)
+    return tuple(ids)
 
 
 def _parse_sku_titles(raw: str) -> dict[str, str]:
@@ -270,6 +291,15 @@ def load_settings(env_file: str | None = None) -> Settings:
 
     agent_name = os.environ["AGENT_NAME"]
     slug = _agent_slug(agent_name)
+
+    # owner_bot: both TG_BOT_TOKEN and TG_USER_ID_LIST must be present and non-empty
+    # for the bot to start. Either missing → bot stays off, no requests are made.
+    tg_bot_token = (os.getenv("TG_BOT_TOKEN") or "").strip() or None
+    tg_user_ids = _parse_tg_user_ids(os.getenv("TG_USER_ID_LIST", ""))
+    if (tg_bot_token is None) != (not tg_user_ids):
+        raise RuntimeError(
+            "owner_bot: TG_BOT_TOKEN and TG_USER_ID_LIST must both be set, or both unset"
+        )
     return Settings(
         agent_command=os.environ["AGENT_COMMAND"],
         capability=os.environ["AGENT_CAPABILITY"],
@@ -312,4 +342,6 @@ def load_settings(env_file: str | None = None) -> Settings:
         owner_wallet=os.getenv("OWNER_WALLET") or None,
         skus=skus,
         payment_rails=tuple(rails),
+        tg_bot_token=tg_bot_token,
+        tg_user_ids=tg_user_ids,
     )

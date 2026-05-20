@@ -77,6 +77,8 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
         owner_wallet=None,
         skus=(default_sku,),
         payment_rails=tuple(rails),
+        tg_bot_token=None,
+        tg_user_ids=(),
     )
     base.update(overrides)
     return Settings(**base)

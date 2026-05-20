@@ -276,6 +276,8 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
             uploaded_files=uploaded_files,
             rail=parsed.rail,
             reservation_key=reservation_key,
+            owner_bot=sidecar.owner_bot,
+            user_body=parsed.body,
         )
         try:
             job_id = await sidecar.jobs.submit(runner)
