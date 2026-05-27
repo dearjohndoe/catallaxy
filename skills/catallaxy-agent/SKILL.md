@@ -171,7 +171,18 @@ AGENT_DESCRIPTION="One-liner.\nSecond line. Third line."
 AGENT_SKUS=<slug>-default:infinite:ton=27000000:usd=62000
 AGENT_SKU_TITLES=<slug>-default=Default
 AGENT_ENDPOINT=http://<host>:<port>
-AGENT_WALLET_PK=<copy from sibling .env on server — never commit>
+AGENT_WALLET_PK=<copy from sibling .env on server, or generate via scripts/gen_wallet.py — never commit>
+AGENT_WALLET_SEED=<24-word mnemonic from the same source>
+# Wallet address (reference): UQ...
+
+# Keep PK + SEED + address together in the .env. The sidecar only reads PK, but:
+# – SEED lets the owner import the wallet into Tonkeeper/MyTonWallet for
+#   manual payouts, top-ups or recovery if the PK file is lost.
+# – The address comment saves you from re-deriving it from PK every time you
+#   need to fund the wallet or paste it somewhere.
+# Skipping SEED is a real footgun — a few agents have already been re-deployed
+# from scratch because the original key was unrecoverable.
+
 # No REGISTRY_ADDRESS — it is hardcoded in the sidecar (settings.REGISTRY_ADDRESS),
 # not an env var. Don't add it; setting it has no effect.
 PORT=<unique port>
@@ -489,6 +500,9 @@ the user prefers, but be ready to switch.
 - [ ] TON rate freshly fetched via WebSearch (not recalled) — §7
 - [ ] Markup % confirmed with the user (no default)
 - [ ] `OWNER_WALLET` confirmed with the user, or preserved from existing env
+- [ ] `.env` contains all three: `AGENT_WALLET_PK`, `AGENT_WALLET_SEED`, and
+      a comment with the wallet address. SEED is mandatory — without it the
+      wallet is unrecoverable if the PK file is lost.
 - [ ] Image URL only if the user asked for one (§9)
 - [ ] Asked the user about owner Telegram bot (§9b); `TG_BOT_TOKEN` +
       `TG_USER_ID_LIST` either both set in `.env.<slug>` or both absent

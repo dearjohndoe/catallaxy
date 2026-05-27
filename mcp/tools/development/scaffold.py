@@ -7,6 +7,24 @@ from mcp.server.fastmcp import FastMCP
 from .template import AGENT_TEMPLATE, ENV_EXAMPLE_TEMPLATE, QUOTE_BLOCK, REQUIREMENTS_TEMPLATE
 
 
+def _to_flat_schema(args_schema: dict) -> dict:
+    """Convert JSON Schema (type=object + properties) to flat legacy format.
+
+    The ctlx.cc marketplace UI expects flat {field: {type, description, required}}.
+    JSON Schema in /info breaks the form. If input is already flat, return as-is.
+    """
+    if args_schema.get("type") == "object" and "properties" in args_schema:
+        required = set(args_schema.get("required", []) or [])
+        flat: dict = {}
+        for fname, fdef in (args_schema.get("properties") or {}).items():
+            entry = {k: v for k, v in (fdef or {}).items() if k != "required"}
+            if fname in required:
+                entry["required"] = True
+            flat[fname] = entry
+        return flat
+    return args_schema
+
+
 def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
@@ -29,6 +47,9 @@ def register(mcp: FastMCP) -> None:
 
         - price: nanoTON (0 if has_quote=true)
         - price_usd: optional micro-USDT — adds USDT rail to the default SKU
+        - args_schema: flat dict `{field: {type, description, required: true}}`
+          (the ctlx.cc UI expects this format). JSON Schema input
+          (`{type: "object", properties: {...}}`) is auto-converted to flat.
 
         Read catallaxy://guide/create-agent for the full step-by-step guide
         and catallaxy://spec/agent-contract for the stdin/stdout contract.
@@ -42,6 +63,8 @@ def register(mcp: FastMCP) -> None:
             result_schema["mime_type"] = result_mime_type
 
         quote_block = QUOTE_BLOCK if has_quote else "\n"
+
+        args_schema = _to_flat_schema(args_schema)
 
         agent_code = AGENT_TEMPLATE.format(
             args_schema=json.dumps(args_schema, indent=4),

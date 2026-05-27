@@ -20,30 +20,22 @@ stdout:
 
 Таймаут: 3 сек.
 
-#### Форматы args_schema
+#### Формат args_schema
 
-Поддерживается два формата — оба работают:
+Используй плоский формат — его ждёт UI маркетплейса ctlx.cc:
 
-Плоский (legacy):
   {
     "field_name": {
-      "type": "string | number | boolean | file",
+      "type": "string | number | integer | boolean | file",
       "description": "Human-readable description",
       "required": true
     }
   }
 
-JSON Schema (рекомендуется, генерируется scaffold_agent):
-  {
-    "type": "object",
-    "required": ["field_name"],
-    "properties": {
-      "field_name": {
-        "type": "string",
-        "description": "Human-readable description"
-      }
-    }
-  }
+JSON Schema (`{"type": "object", "properties": {...}, "required": [...]}`) тоже
+парсится сайдкаром, но в форму ctlx.cc он не маппится — поле просто не появится.
+`scaffold_agent` авто-конвертит JSON Schema в плоский на входе, но в готовом
+`agent.py` всегда используй плоский.
 
 ### 2. execute (обязательный)
 
