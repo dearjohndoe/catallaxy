@@ -384,6 +384,19 @@ def test_cleanup_expired_quotes_removes_expired(app_factory):
 
 # ── HTTP handlers via aiohttp test client ──────────────────────────────
 
+def _force_healthy_monitors(app: SidecarApp) -> None:
+    """Bypass plan-D 503 gate for tests that don't actually run verifier.start().
+
+    Without a real WalletMonitor running, `is_healthy()` returns False and
+    `build_402_response` would refuse with 503. Tests that explicitly want to
+    exercise the 503 path should remove this override.
+    """
+    if app.verifier is not None:
+        app.verifier.is_healthy = lambda max_age_seconds=60.0: True  # type: ignore[method-assign]
+    if app.jetton_verifier is not None:
+        app.jetton_verifier.is_healthy = lambda max_age_seconds=60.0: True  # type: ignore[method-assign]
+
+
 @pytest.fixture
 async def client(app_factory, tmp_path):
     """Build a mocked SidecarApp and serve it via aiohttp TestClient.
@@ -392,6 +405,7 @@ async def client(app_factory, tmp_path):
     """
     app = app_factory()
     app.args_schema = {"text": {"type": "string", "required": True}}
+    _force_healthy_monitors(app)
 
     async def noop_startup():
         app._file_store_dir.mkdir(parents=True, exist_ok=True)
@@ -460,6 +474,17 @@ async def test_invoke_preflight_returns_402_with_payment_info(client):
     data = await resp.json()
     assert data["payment_request"]["address"] == "EQagent"
     assert data["payment_request"]["amount"] == "1000000"
+
+
+async def test_invoke_preflight_returns_503_when_monitor_unhealthy(client):
+    """Plan D: refuse preflight when the TON monitor has no fresh poll."""
+    client.sidecar.verifier.is_healthy = lambda max_age_seconds=60.0: False  # type: ignore[method-assign]
+    resp = await client.post("/invoke", json={"capability": "translate"})
+    assert resp.status == 503
+    assert resp.headers["Retry-After"] == "60"
+    data = await resp.json()
+    assert "service temporarily unavailable" in data["error"]
+    assert "TON" in data["detail"]
 
 
 async def test_invoke_preflight_preserves_valid_nonce(client):
@@ -1099,6 +1124,7 @@ def _make_dynamic_app(app_factory, tmp_path, sku_ids: list[str]) -> "SidecarApp"
 
 async def _dynamic_test_client(app_factory, tmp_path, sku_ids: list[str]):
     app = _make_dynamic_app(app_factory, tmp_path, sku_ids)
+    _force_healthy_monitors(app)
 
     async def noop_startup():
         app._file_store_dir.mkdir(parents=True, exist_ok=True)

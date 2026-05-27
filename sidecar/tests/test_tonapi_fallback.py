@@ -210,3 +210,29 @@ async def test_wallet_monitor_no_fallback_without_client():
 
     assert monitor._consecutive_lite_errors == 1
     assert monitor._last_successful_poll_at == 0.0
+
+
+# ── WalletMonitor.is_healthy (plan D) ──────────────────────────────────
+
+
+def test_wallet_monitor_is_unhealthy_before_first_poll():
+    monitor = WalletMonitor(
+        client=MagicMock(), address="UQAgent", poll_interval=60,
+    )
+    assert monitor.is_healthy() is False
+
+
+def test_wallet_monitor_is_healthy_right_after_successful_poll():
+    monitor = WalletMonitor(
+        client=MagicMock(), address="UQAgent", poll_interval=60,
+    )
+    monitor._last_successful_poll_at = time.time()
+    assert monitor.is_healthy(max_age_seconds=60) is True
+
+
+def test_wallet_monitor_is_unhealthy_after_staleness_window():
+    monitor = WalletMonitor(
+        client=MagicMock(), address="UQAgent", poll_interval=60,
+    )
+    monitor._last_successful_poll_at = time.time() - 120
+    assert monitor.is_healthy(max_age_seconds=60) is False

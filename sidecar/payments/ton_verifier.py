@@ -54,6 +54,12 @@ class PaymentVerifier:
             await self._client.close()
             self._client = None
 
+    def is_healthy(self, max_age_seconds: float = 60.0) -> bool:
+        """Proxy to monitor.is_healthy. Unstarted verifier is never healthy."""
+        if self._monitor is None:
+            return False
+        return self._monitor.is_healthy(max_age_seconds)
+
     async def rebuild_client(self) -> None:
         """Periodically swap the LiteBalancer to shed long-lived state.
 

@@ -71,6 +71,7 @@ CONTENT = """# Sidecar Environment Variables
 | TONAPI_FALLBACK_DISABLED | 0 | `=1` — выключить TonAPI-фолбэк в мониторах. Останутся только ADNL/LiteBalancer. |
 | BALANCER_REBUILD_INTERVAL_SEC | 14400 | Период (сек) фоновой пересборки `LiteBalancer` у verifier'ов и sender'а. Дёшевая страховка от накапливающегося state у балансера. Применяется ±15% jitter. |
 | BALANCER_REBUILD_DISABLED | 0 | `=1` — выключить периодическую пересборку балансера. |
+| PAYMENT_MONITOR_MAX_AGE_SEC | 60 | Сколько сек без успешного poll'a считать монитор «протухшим». Если на preflight (без `tx_hash`) монитор для нужного рейла протух — сайдкар отдаёт **503 Retry-After: 60** вместо 402, чтобы клиент не платил вслепую. |
 
 `TONAPI_KEY` теперь используется не только агент-кодом, но и самим сидекаром
 (в WalletMonitor / JettonWalletMonitor) — ставь её во всех .env, где есть

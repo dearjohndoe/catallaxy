@@ -78,6 +78,12 @@ class JettonWalletMonitor:
     def force(self) -> None:
         self._force.set()
 
+    def is_healthy(self, max_age_seconds: float = 60.0) -> bool:
+        """See WalletMonitor.is_healthy."""
+        if self._last_successful_poll_at == 0.0:
+            return False
+        return (time.time() - self._last_successful_poll_at) < max_age_seconds
+
     def get(self, nonce: str) -> JettonPaymentTx | None:
         return self._by_nonce.get(nonce.strip())
 

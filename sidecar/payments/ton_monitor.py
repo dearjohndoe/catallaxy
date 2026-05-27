@@ -76,6 +76,17 @@ class WalletMonitor:
         """Wake the monitor to poll immediately."""
         self._force.set()
 
+    def is_healthy(self, max_age_seconds: float = 60.0) -> bool:
+        """Has a successful poll completed within the staleness window?
+
+        Used by the invoke handler (plan D) to return 503 on preflight when
+        the monitor is degraded, so callers don't pay before the sidecar
+        can possibly see their tx.
+        """
+        if self._last_successful_poll_at == 0.0:
+            return False
+        return (time.time() - self._last_successful_poll_at) < max_age_seconds
+
     def get(self, nonce: str) -> Transaction | None:
         return self._by_nonce.get(nonce.strip())
 
