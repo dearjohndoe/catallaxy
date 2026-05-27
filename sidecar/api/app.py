@@ -12,7 +12,7 @@ from heartbeat import HeartbeatManager
 from jobs import JobStore
 from storage import StateStore
 from transfer import TransferSender
-from payments import PaymentVerifier, JettonPaymentVerifier, ProcessedTxStore, RefundQueue
+from payments import PaymentVerifier, JettonPaymentVerifier, ProcessedTxStore, RefundQueue, TonAPIClient
 from jetton import USDT_MASTER_MAINNET, USDT_MASTER_TESTNET
 from owner_bot import OwnerBot
 from settings import Settings, AgentSku, DEFAULT_SKU_ID  # noqa: F401 — re-exported via api package
@@ -52,12 +52,18 @@ class SidecarApp:
         self.stock = StockStore(settings.stock_db_path)
         self._skus_by_id: dict[str, AgentSku] = {s.sku_id: s for s in settings.skus}
         self._single_sku: AgentSku | None = settings.skus[0] if len(settings.skus) == 1 else None
+        # Shared TonAPI HTTP fallback (plan C). One aiohttp session per sidecar,
+        # passed to both TON and jetton monitors. Disabled via env if needed.
+        self.tonapi_client: TonAPIClient | None = (
+            None if os.environ.get("TONAPI_FALLBACK_DISABLED") == "1" else TonAPIClient()
+        )
         self.verifier = PaymentVerifier(
             agent_wallet=settings.agent_wallet,
             min_amount=0,  # per-call min comes from SKU; constructor default unused
             payment_timeout_seconds=settings.payment_timeout,
             enforce_comment_nonce=settings.enforce_comment_nonce,
             testnet=settings.testnet,
+            tonapi_client=self.tonapi_client,
         )
         self.state_store = StateStore(settings.state_path)
         self.sender = TransferSender(
@@ -75,6 +81,7 @@ class SidecarApp:
                 min_amount=0,  # per-call min comes from SKU; constructor default unused
                 payment_timeout_seconds=settings.payment_timeout,
                 testnet=settings.testnet,
+                tonapi_client=self.tonapi_client,
             )
         # Refund queue lives in the same SQLite file as ProcessedTxStore — they
         # already share per-agent scoping via tx_db_path and SQLite handles the
@@ -132,6 +139,7 @@ class SidecarApp:
                     min_amount=0,  # per-call min comes from SKU; constructor default unused
                     payment_timeout_seconds=self.settings.payment_timeout,
                     testnet=self.settings.testnet,
+                    tonapi_client=self.tonapi_client,
                 )
             try:
                 await self.jetton_verifier.start()

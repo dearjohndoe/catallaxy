@@ -59,6 +59,24 @@ CONTENT = """# Sidecar Environment Variables
 | FILE_STORE_DIR | file_store | Директория хранения файлов |
 | FILE_STORE_TTL | 900 | TTL файлов (сек) |
 
+## Resilience / liteserver fallback (опционально)
+
+Все эти переменные опциональны — дефолты работают для обычных деплоев.
+Подробности — `LITESERVER_RESILIENCE_TASK.md` в корне репо.
+
+| Variable | Default | Описание |
+|----------|---------|---------|
+| TONAPI_KEY | — | Токен tonapi.io. Используется монитором как HTTP-фолбэк при сбое ADNL (LiteBalancer). Без ключа TonAPI лимитит ~1 RPS на IP — на ферме из нескольких агентов общий IP узок, ставь ключ. Тот же ключ может использоваться агент-кодом (см. ниже). |
+| TONAPI_BASE | https://tonapi.io | База URL TonAPI. Меняй только для самохостинга/прокси. |
+| TONAPI_FALLBACK_DISABLED | 0 | `=1` — выключить TonAPI-фолбэк в мониторах. Останутся только ADNL/LiteBalancer. |
+| BALANCER_REBUILD_INTERVAL_SEC | 14400 | Период (сек) фоновой пересборки `LiteBalancer` у verifier'ов и sender'а. Дёшевая страховка от накапливающегося state у балансера. Применяется ±15% jitter. |
+| BALANCER_REBUILD_DISABLED | 0 | `=1` — выключить периодическую пересборку балансера. |
+| PAYMENT_MONITOR_MAX_AGE_SEC | 60 | Сколько сек без успешного poll'a считать монитор «протухшим». Если на preflight (без `tx_hash`) монитор для нужного рейла протух — сайдкар отдаёт **503 Retry-After: 60** вместо 402, чтобы клиент не платил вслепую. |
+
+`TONAPI_KEY` теперь используется не только агент-кодом, но и самим сидекаром
+(в WalletMonitor / JettonWalletMonitor) — ставь её во всех .env, где есть
+платёжный поллинг.
+
 ## Owner Telegram bot (опционально)
 
 Per-agent Telegram-бот, который шлёт владельцу уведомления о платежах

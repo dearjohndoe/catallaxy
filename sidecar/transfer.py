@@ -233,6 +233,14 @@ class TransferSender:
         wallet = WalletV4R2.from_private_key(None, pk)  # type: ignore[arg-type]
         return wallet.address.to_str(is_user_friendly=True, is_bounceable=False)
 
+    async def rebuild_client(self) -> None:
+        """Drop current LiteBalancer and re-init under the send-lock.
+
+        Serialised with send() so it can never tear an in-flight transfer.
+        """
+        async with self._lock:
+            await self._reconnect()
+
     async def close(self) -> None:
         if self._client is not None:
             await self._client.close()

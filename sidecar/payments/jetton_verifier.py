@@ -9,6 +9,7 @@ from tonutils.types import NetworkGlobalID
 
 from .jetton_monitor import JettonWalletMonitor
 from .nonce import parse_nonce
+from .tonapi_client import TonAPIClient
 from .types import PaymentVerificationError, VerifiedPayment
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class JettonPaymentVerifier:
         min_amount: int,
         payment_timeout_seconds: int,
         testnet: bool = False,
+        tonapi_client: TonAPIClient | None = None,
     ) -> None:
         self._agent_wallet = agent_wallet
         self._usdt_master = usdt_master
@@ -36,6 +38,7 @@ class JettonPaymentVerifier:
         self._client: LiteBalancer | None = None
         self._monitor: JettonWalletMonitor | None = None
         self.jetton_wallet_address: str = ""
+        self._tonapi_client = tonapi_client
 
     async def start(self) -> None:
         from tonutils.contracts.jetton.master import JettonMasterStablecoin
@@ -55,7 +58,10 @@ class JettonPaymentVerifier:
         )
 
         self._monitor = JettonWalletMonitor(
-            self._client, self._agent_wallet, self.jetton_wallet_address,
+            self._client,
+            self._agent_wallet,
+            self.jetton_wallet_address,
+            tonapi_client=self._tonapi_client,
         )
         await self._monitor.start()
 
@@ -66,6 +72,27 @@ class JettonPaymentVerifier:
         if self._client:
             await self._client.close()
             self._client = None
+
+    def is_healthy(self, max_age_seconds: float = 60.0) -> bool:
+        """Proxy to monitor.is_healthy. Unstarted verifier is never healthy."""
+        if self._monitor is None:
+            return False
+        return self._monitor.is_healthy(max_age_seconds)
+
+    async def rebuild_client(self) -> None:
+        """Swap LiteBalancer; jetton monitor cache survives the swap."""
+        if self._monitor is None:
+            return
+        new_client = LiteBalancer.from_network_config(self._network)
+        await new_client.connect()
+        old = self._client
+        await self._monitor.replace_client(new_client)
+        self._client = new_client
+        if old is not None:
+            try:
+                await old.close()
+            except Exception:
+                logger.exception("JettonPaymentVerifier.rebuild_client: old client close failed")
 
     async def verify(self, tx_hash: str, raw_nonce: str, min_amount: int | None = None) -> VerifiedPayment:
         if self._monitor is None:

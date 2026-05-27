@@ -6,9 +6,9 @@ import time
 
 from pytoniq_core import Transaction
 from tonutils.clients import LiteBalancer
-from tonutils.exceptions import BalancerError, ProviderResponseError
 
 from .nonce import _parse_payment_nonce
+from .tonapi_client import TonAPIClient
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,13 @@ class WalletMonitor:
 
     CACHE_TTL = 600  # seconds — evict transactions older than this
 
-    def __init__(self, client: LiteBalancer, address: str, poll_interval: int = 10) -> None:
+    def __init__(
+        self,
+        client: LiteBalancer,
+        address: str,
+        poll_interval: int = 10,
+        tonapi_client: TonAPIClient | None = None,
+    ) -> None:
         self._client = client
         self._address = address
         self._poll_interval = poll_interval
@@ -27,6 +33,9 @@ class WalletMonitor:
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._last_processed_lt: int = 0
+        self._tonapi_client = tonapi_client
+        self._last_successful_poll_at: float = 0.0
+        self._consecutive_lite_errors: int = 0
 
     async def start(self) -> None:
         await self._poll()  # populate cache immediately before accepting requests
@@ -41,10 +50,42 @@ class WalletMonitor:
                 await self._task
             except (asyncio.CancelledError, Exception):
                 pass
+            self._task = None
+
+    async def replace_client(self, client: LiteBalancer) -> None:
+        """Swap the underlying liteserver client without dropping cache state.
+
+        Used by the periodic balancer-rebuild loop. `_by_nonce` and
+        `_last_processed_lt` survive, so an inflight `verify()` only loses
+        at most one poll cycle.
+        """
+        if self._task is not None:
+            self._stop.set()
+            self._force.set()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._task = None
+        self._stop = asyncio.Event()
+        self._force = asyncio.Event()
+        self._client = client
+        self._task = asyncio.create_task(self._loop())
 
     def force(self) -> None:
         """Wake the monitor to poll immediately."""
         self._force.set()
+
+    def is_healthy(self, max_age_seconds: float = 60.0) -> bool:
+        """Has a successful poll completed within the staleness window?
+
+        Used by the invoke handler (plan D) to return 503 on preflight when
+        the monitor is degraded, so callers don't pay before the sidecar
+        can possibly see their tx.
+        """
+        if self._last_successful_poll_at == 0.0:
+            return False
+        return (time.time() - self._last_successful_poll_at) < max_age_seconds
 
     def get(self, nonce: str) -> Transaction | None:
         return self._by_nonce.get(nonce.strip())
@@ -53,65 +94,85 @@ class WalletMonitor:
         """Atomically get and remove a cached transaction by nonce."""
         return self._by_nonce.pop(nonce.strip(), None)
 
+    def _ingest_txs(self, txs, cutoff: float, new_lt_watermark: int) -> int:
+        """Process a batch of txs, update _by_nonce, return new watermark.
+
+        Stops at the first tx with lt <= _last_processed_lt or now < cutoff
+        (txs are assumed newest-first).
+        """
+        for tx in txs:
+            if tx.lt <= self._last_processed_lt:
+                break
+            if tx.now < cutoff:
+                break
+            if tx.lt > new_lt_watermark:
+                new_lt_watermark = tx.lt
+            if tx.in_msg is None:
+                continue
+            comment = _parse_payment_nonce(tx.in_msg.body)
+            if comment:
+                self._by_nonce[comment.strip()] = tx
+        return new_lt_watermark
+
+    async def _poll_adnl(self, cutoff: float, new_lt_watermark: int) -> int:
+        """Walk the agent's tx history via LiteBalancer. Raises on transport errors."""
+        current_lt: int | None = None
+        while True:
+            kwargs: dict = {"limit": 50}
+            if current_lt is not None:
+                kwargs["from_lt"] = current_lt
+            txs = await self._client.get_transactions(self._address, **kwargs)
+            if not txs:
+                break
+            new_lt_watermark = self._ingest_txs(txs, cutoff, new_lt_watermark)
+            last_tx = txs[-1]
+            if last_tx.lt <= self._last_processed_lt or last_tx.now < cutoff:
+                break
+            if current_lt == last_tx.lt:
+                break
+            current_lt = last_tx.lt
+        return new_lt_watermark
+
+    async def _poll_tonapi(self, cutoff: float, new_lt_watermark: int) -> int:
+        """Single-shot fetch via TonAPI HTTP (plan C fallback)."""
+        assert self._tonapi_client is not None
+        txs = await self._tonapi_client.get_account_transactions(self._address, limit=50)
+        if txs:
+            new_lt_watermark = self._ingest_txs(txs, cutoff, new_lt_watermark)
+        return new_lt_watermark
+
     async def _poll(self) -> None:
+        cutoff = time.time() - self.CACHE_TTL
+        new_lt_watermark = self._last_processed_lt
+        adnl_ok = False
+        tonapi_ok = False
         try:
-            cutoff = time.time() - self.CACHE_TTL
-            current_lt = None
-            new_lt_watermark = self._last_processed_lt
-
-            while True:
-                kwargs = {"limit": 50}
-                if current_lt is not None:
-                    kwargs["from_lt"] = current_lt
-
-                txs = await self._client.get_transactions(self._address, **kwargs)
-                if not txs:
-                    break
-
-                batch_had_new = False
-                for tx in txs:
-                    if tx.lt <= self._last_processed_lt:
-                        # Reached transactions we have already fully processed in previous polls
-                        break
-
-                    if tx.now < cutoff:
-                        # Reached transactions that are too old
-                        break
-
-                    if tx.lt > new_lt_watermark:
-                        new_lt_watermark = tx.lt
-
-                    if tx.in_msg is None:
-                        continue
-
-                    comment = _parse_payment_nonce(tx.in_msg.body)
-                    if comment:
-                        self._by_nonce[comment.strip()] = tx
-                        batch_had_new = True
-
-                # Determine if we should fetch the next page
-                last_tx = txs[-1]
-                if last_tx.lt <= self._last_processed_lt or last_tx.now < cutoff:
-                    break
-
-                # Continue fetching from the last seen transaction LT
-                # Note: this will re-fetch the last_tx as the first element of next batch,
-                # but duplicate handling (or just overwriting in dict dict) handles it safely.
-                if current_lt == last_tx.lt:
-                    break  # Avoid infinite loop if API behaves unexpectedly
-                current_lt = last_tx.lt
-
-        except (BalancerError, ProviderResponseError) as e:
-            logger.warning("WalletMonitor: tx fetch interrupted (%s), partial results saved", e)
-
-        except Exception:
-            logger.exception("WalletMonitor poll failed")
-
+            try:
+                new_lt_watermark = await self._poll_adnl(cutoff, new_lt_watermark)
+                adnl_ok = True
+                self._consecutive_lite_errors = 0
+            except Exception as e:
+                self._consecutive_lite_errors += 1
+                if self._tonapi_client is None:
+                    logger.warning(
+                        "WalletMonitor: ADNL fetch failed (%s); no TonAPI fallback configured",
+                        e,
+                    )
+                else:
+                    logger.warning(
+                        "WalletMonitor: ADNL fetch failed (%s); falling back to TonAPI", e,
+                    )
+                    try:
+                        new_lt_watermark = await self._poll_tonapi(cutoff, new_lt_watermark)
+                        tonapi_ok = True
+                        logger.info("WalletMonitor: TonAPI fallback poll succeeded")
+                    except Exception:
+                        logger.exception("WalletMonitor: TonAPI fallback failed too")
         finally:
             if new_lt_watermark > self._last_processed_lt:
                 self._last_processed_lt = new_lt_watermark
-
-            # Evict stale entries
+            if adnl_ok or tonapi_ok:
+                self._last_successful_poll_at = time.time()
             for k, tx in list(self._by_nonce.items()):
                 if tx.now < cutoff:
                     del self._by_nonce[k]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -85,10 +86,39 @@ async def build_402_response(
     min_ton: int,
     min_usdt: int,
 ) -> web.Response:
-    """Preflight response: stock gate + 402 Payment Required."""
+    """Preflight response: stock gate + monitor health gate + 402 Payment Required."""
     view = await sidecar.stock.get_view(sku.sku_id)
     if view.stock_left is not None and view.stock_left <= 0:
         return web.json_response({"error": "out_of_stock", "sku": sku.sku_id}, status=409)
+
+    # Monitor-health gate (plan D). If a rail we would advertise has no fresh
+    # successful poll, refuse the preflight with 503 — better than taking the
+    # payment when we can't detect it. Callers retry after `Retry-After`.
+    try:
+        max_age = float(os.environ.get("PAYMENT_MONITOR_MAX_AGE_SEC", "60"))
+    except ValueError:
+        max_age = 60.0
+    unhealthy_rails: list[str] = []
+    if eff_ton and (sidecar.verifier is None or not sidecar.verifier.is_healthy(max_age)):
+        unhealthy_rails.append("TON")
+    if eff_usd and min_usdt and (
+        sidecar.jetton_verifier is None or not sidecar.jetton_verifier.is_healthy(max_age)
+    ):
+        unhealthy_rails.append("USDT")
+    if unhealthy_rails:
+        logger.warning(
+            "preflight refused: payment monitor degraded for rails=%s sku=%s",
+            unhealthy_rails, sku.sku_id,
+        )
+        return web.json_response(
+            {
+                "error": "service temporarily unavailable",
+                "detail": f"payment monitor degraded ({', '.join(unhealthy_rails)})",
+                "retry_after_seconds": 60,
+            },
+            status=503,
+            headers={"Retry-After": "60"},
+        )
 
     nonce = parsed.nonce
     if not nonce or not nonce.endswith(f":{sidecar.sidecar_id}"):

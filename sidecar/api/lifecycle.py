@@ -11,6 +11,7 @@ from owner_bot import OwnerBot
 from api.constants import DESCRIBE_TIMEOUT
 from api.describe import fetch_describe
 from api.domain.refund_worker import refund_worker_loop
+from api.infra.balancer_rebuild import balancer_rebuild_loop
 
 if TYPE_CHECKING:
     from api.app import SidecarApp
@@ -110,6 +111,7 @@ async def startup(app: "SidecarApp") -> None:
         app.heartbeat.loop(app.stop_event),
         app.cleanup_loop(),
         refund_worker_loop(app),
+        balancer_rebuild_loop(app),
     ]
     if app.owner_bot is not None:
         task_coros.append(app.owner_bot.poll_loop(app.stop_event))
@@ -128,6 +130,8 @@ async def shutdown(app: "SidecarApp") -> None:
     await app.verifier.close()
     if app.jetton_verifier:
         await app.jetton_verifier.close()
+    if app.tonapi_client is not None:
+        await app.tonapi_client.close()
     await app.tx_store.close()
     await app.stock.close()
     await app.refund_queue.close()

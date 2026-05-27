@@ -9,6 +9,7 @@ from tonutils.types import NetworkGlobalID
 
 from .nonce import _parse_payment_nonce, parse_nonce
 from .ton_monitor import WalletMonitor
+from .tonapi_client import TonAPIClient
 from .types import PaymentVerificationError, VerifiedPayment
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ class PaymentVerifier:
         payment_timeout_seconds: int,
         enforce_comment_nonce: bool = True,
         testnet: bool = False,
+        tonapi_client: TonAPIClient | None = None,
     ) -> None:
         self._agent_wallet = agent_wallet
         self._min_amount = min_amount
@@ -33,11 +35,14 @@ class PaymentVerifier:
         self._network = NetworkGlobalID.TESTNET if testnet else NetworkGlobalID.MAINNET
         self._client: LiteBalancer | None = None
         self._monitor: WalletMonitor | None = None
+        self._tonapi_client = tonapi_client
 
     async def start(self) -> None:
         self._client = LiteBalancer.from_network_config(self._network)
         await self._client.connect()
-        self._monitor = WalletMonitor(self._client, self._agent_wallet)
+        self._monitor = WalletMonitor(
+            self._client, self._agent_wallet, tonapi_client=self._tonapi_client,
+        )
         await self._monitor.start()
         logger.info("PaymentVerifier started (testnet=%s)", self._network == NetworkGlobalID.TESTNET)
 
@@ -48,6 +53,31 @@ class PaymentVerifier:
         if self._client:
             await self._client.close()
             self._client = None
+
+    def is_healthy(self, max_age_seconds: float = 60.0) -> bool:
+        """Proxy to monitor.is_healthy. Unstarted verifier is never healthy."""
+        if self._monitor is None:
+            return False
+        return self._monitor.is_healthy(max_age_seconds)
+
+    async def rebuild_client(self) -> None:
+        """Periodically swap the LiteBalancer to shed long-lived state.
+
+        Monitor's `_by_nonce` cache and `_last_processed_lt` are preserved,
+        so inflight verify() loses at most one poll cycle.
+        """
+        if self._monitor is None:
+            return
+        new_client = LiteBalancer.from_network_config(self._network)
+        await new_client.connect()
+        old = self._client
+        await self._monitor.replace_client(new_client)
+        self._client = new_client
+        if old is not None:
+            try:
+                await old.close()
+            except Exception:
+                logger.exception("PaymentVerifier.rebuild_client: old client close failed")
 
     async def verify(self, tx_hash: str, raw_nonce: str, min_amount: int | None = None) -> VerifiedPayment:
         if self._monitor is None:

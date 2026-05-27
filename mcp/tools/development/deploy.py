@@ -9,9 +9,23 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def deploy_agent(agent_dir: str, env_file: str | None = None) -> dict:
-        """Install and start agent sidecar via systemd.
+        """Install + enable + START agent sidecar via systemd, on the LOCAL host.
 
-        Calls: sidecar.py service --name <name> install --workdir <workdir> --env-file <env>
+        Calls (locally, via subprocess):
+            sidecar.py service --name <name> install
+                --workdir <agent_dir> --env-file <env> --sidecar-path <sidecar.py>
+
+        This is local-only — it cannot deploy to a remote production host
+        (no SSH). For remote deploys, the one canonical command is:
+
+            ssh <user>@<host> 'cd <agents_root> && sudo .venv/bin/python sidecar/sidecar.py \\
+                service --name <slug> install --env-file test-agents/.env.<slug>'
+
+        `install` already enables and starts the unit — no need to follow with
+        `systemctl start`. Pass the bare slug to `--name` (auto-suffixed with
+        `-ctlx-agent`). If sidecar.py lives under a subpath on the host,
+        symlink `<agents_root>/sidecar` → its directory so the command stays
+        canonical.
         """
         project_root = os.getenv("CATALLAXY_PROJECT_ROOT", "/media/second_disk/cont5")
         env_path = str(Path(env_file or str(Path(agent_dir) / ".env")).resolve())

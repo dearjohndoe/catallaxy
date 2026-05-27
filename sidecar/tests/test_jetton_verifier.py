@@ -316,8 +316,10 @@ async def test_jetton_monitor_force_wakes_loop_and_stop_exits():
 
     m = _monitor(client, poll_interval=60)
     m._task = asyncio.create_task(m._loop())
+    task = m._task
     await asyncio.sleep(0.01)   # let the loop block on the force event
     m.force()
     await asyncio.sleep(0.01)
     await m.stop()
-    assert m._task.done()
+    assert m._task is None
+    assert task.done()

@@ -206,12 +206,15 @@ async def test_wallet_monitor_force_wakes_loop_and_stop_exits():
 
     monitor = WalletMonitor(client=client, address="EQaddr", poll_interval=60)
     monitor._task = asyncio.create_task(monitor._loop())
+    task = monitor._task
     # Let the loop start and block on the force event
     await asyncio.sleep(0.01)
     monitor.force()
     await asyncio.sleep(0.01)
     await monitor.stop()
-    assert monitor._task.done()
+    # stop() nulls _task after awaiting it (so replace_client can rebind cleanly)
+    assert monitor._task is None
+    assert task.done()
 
 
 # ── PaymentVerifier ────────────────────────────────────────────────────

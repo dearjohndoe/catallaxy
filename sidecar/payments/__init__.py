@@ -1,3 +1,7 @@
+from .balancer_patch import apply_mark_error_patch as _apply_mark_error_patch
+
+_apply_mark_error_patch()
+
 from .types import (
     PaymentVerificationError,
     VerifiedPayment,
@@ -19,6 +23,7 @@ from .ton_monitor import WalletMonitor
 from .ton_verifier import PaymentVerifier
 from .jetton_monitor import JettonWalletMonitor
 from .jetton_verifier import JettonPaymentVerifier
+from .tonapi_client import TonAPIClient, TonAPIError, TonAPIRateLimitError
 
 __all__ = [
     "PaymentVerificationError",
@@ -39,4 +44,7 @@ __all__ = [
     "PaymentVerifier",
     "JettonWalletMonitor",
     "JettonPaymentVerifier",
+    "TonAPIClient",
+    "TonAPIError",
+    "TonAPIRateLimitError",
 ]
