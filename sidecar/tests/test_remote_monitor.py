@@ -149,7 +149,7 @@ def test_remote_monitor_force_and_replace_client_are_noop():
     # No exception, no side effects.
     m.force()
     # replace_client is async — make sure it doesn't blow up.
-    asyncio.get_event_loop().run_until_complete(m.replace_client(object()))
+    asyncio.run(m.replace_client(object()))
 
 
 def test_remote_monitor_is_healthy_returns_cached_true_initially():
