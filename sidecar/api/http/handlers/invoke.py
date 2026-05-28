@@ -133,6 +133,31 @@ def _apply_quote_amounts(
     return quote_entry, new_min_ton, new_min_usdt, None
 
 
+def _monitor_healthy_for_rail(sidecar: "SidecarApp", rail: str) -> bool:
+    """Return True if the rail's wallet monitor recently polled successfully.
+
+    Used by the preflight gate (plan D) to short-circuit a 402 when we know
+    we can't see the chain right now. `max_age_seconds=120` matches the
+    monitor's poll_interval of 30s with comfortable headroom.
+
+    Delegates to `verifier.is_healthy(...)`, which itself proxies to the
+    underlying WalletMonitor — keeps tests able to monkey-patch at the
+    verifier level.
+    """
+    if rail == "USDT":
+        verifier = getattr(sidecar, "jetton_verifier", None)
+    else:
+        verifier = getattr(sidecar, "verifier", None)
+    if verifier is None:
+        return False
+    try:
+        return bool(verifier.is_healthy(max_age_seconds=120.0))
+    except Exception:
+        # Safer to allow preflight than to break it from a check bug.
+        logger.exception("_monitor_healthy_for_rail: is_healthy raised")
+        return True
+
+
 async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Response:
     parsed = await _parse_invoke_request(request, sidecar._file_store_dir)
     if isinstance(parsed, web.Response):
@@ -168,6 +193,20 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
             return quote_err
 
         if not parsed.tx_hash:
+            if not _monitor_healthy_for_rail(sidecar, parsed.rail):
+                logger.warning(
+                    "invoke: monitor unhealthy for rail=%s, refusing preflight",
+                    parsed.rail,
+                )
+                return web.json_response(
+                    {
+                        "error": "service temporarily unavailable",
+                        "detail": f"Wallet monitor for rail={parsed.rail} has no fresh on-chain view; retry shortly.",
+                        "retry_after_seconds": 60,
+                    },
+                    status=503,
+                    headers={"Retry-After": "60"},
+                )
             return await build_402_response(parsed, sku, sidecar, eff_ton, eff_usd, min_ton, min_usdt)
 
         missing = validate_body(parsed.payload, sidecar.args_schema, has_tx=True, uploaded_files=uploaded_files)

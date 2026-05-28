@@ -937,6 +937,7 @@ async def _stock_client(app_factory, tmp_path, initial_stock: int = 1):
     )
     app = app_factory(skus=(sku,), payment_rails=("TON",))
     app.args_schema = {"text": {"type": "string", "required": True}}
+    _force_healthy_monitors(app)
 
     async def noop_startup():
         app._file_store_dir.mkdir(parents=True, exist_ok=True)

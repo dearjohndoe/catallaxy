@@ -173,7 +173,7 @@ async def test_wallet_monitor_falls_back_to_tonapi_on_adnl_failure():
     tonapi.get_account_transactions.assert_awaited_once_with("UQAgent", limit=50)
     assert monitor._consecutive_lite_errors == 1
     assert monitor._last_successful_poll_at > 0
-    assert monitor.get("recovered") is fallback_tx
+    assert await monitor.get("recovered") is fallback_tx
 
 
 @pytest.mark.asyncio
@@ -193,7 +193,7 @@ async def test_wallet_monitor_skips_fallback_when_adnl_succeeds():
 
     tonapi.get_account_transactions.assert_not_called()
     assert monitor._consecutive_lite_errors == 0
-    assert monitor.get("ok-via-adnl") is adnl_tx
+    assert await monitor.get("ok-via-adnl") is adnl_tx
 
 
 @pytest.mark.asyncio

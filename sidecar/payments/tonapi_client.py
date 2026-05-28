@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -27,6 +28,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE = "https://tonapi.io"
 DEFAULT_TIMEOUT = 8.0
+# When TonAPI returns 429, suppress further requests for this many seconds.
+# Saves the quota and stops us from hammering the same key from other sidecars.
+RATE_LIMIT_COOLDOWN_SEC = 60.0
 
 
 class TonAPIError(Exception):
@@ -64,6 +68,7 @@ class TonAPIClient:
         self._timeout = aiohttp.ClientTimeout(total=timeout)
         self._session: aiohttp.ClientSession | None = None
         self._session_lock = asyncio.Lock()
+        self._rate_limited_until: float = 0.0
 
     @property
     def has_api_key(self) -> bool:
@@ -98,12 +103,19 @@ class TonAPIClient:
         is left to the caller — TonAPI's pagination semantics differ from
         ADNL and we don't need them here (50 txs covers >> our poll window).
         """
+        now = time.time()
+        if now < self._rate_limited_until:
+            raise TonAPIRateLimitError(
+                f"429 cooldown active, {self._rate_limited_until - now:.0f}s left"
+            )
+
         session = await self._ensure_session()
         url = f"{self._base}/v2/blockchain/accounts/{address}/transactions"
         params = {"limit": str(limit)}
         try:
             async with session.get(url, params=params) as resp:
                 if resp.status == 429:
+                    self._rate_limited_until = time.time() + RATE_LIMIT_COOLDOWN_SEC
                     raise TonAPIRateLimitError("429 rate limited")
                 if resp.status >= 400:
                     body = (await resp.text())[:200]

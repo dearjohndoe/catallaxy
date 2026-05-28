@@ -9,7 +9,7 @@ from tonutils.clients import LiteBalancer
 from jetton import parse_transfer_notification
 
 from .nonce import _parse_payment_nonce
-from .tonapi_client import TonAPIClient
+from .tonapi_client import TonAPIClient, TonAPIRateLimitError
 from .types import JettonPaymentTx
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ class JettonWalletMonitor:
         client: LiteBalancer,
         agent_address: str,
         jetton_wallet_address: str,
-        poll_interval: int = 10,
+        poll_interval: int = 30,
         tonapi_client: TonAPIClient | None = None,
     ) -> None:
         self._client = client
@@ -41,6 +41,7 @@ class JettonWalletMonitor:
         self._tonapi_client = tonapi_client
         self._last_successful_poll_at: float = 0.0
         self._consecutive_lite_errors: int = 0
+        self._last_loop_tick: float = 0.0
 
     async def start(self) -> None:
         await self._poll()
@@ -78,16 +79,16 @@ class JettonWalletMonitor:
     def force(self) -> None:
         self._force.set()
 
-    def is_healthy(self, max_age_seconds: float = 60.0) -> bool:
+    def is_healthy(self, max_age_seconds: float = 120.0) -> bool:
         """See WalletMonitor.is_healthy."""
         if self._last_successful_poll_at == 0.0:
             return False
         return (time.time() - self._last_successful_poll_at) < max_age_seconds
 
-    def get(self, nonce: str) -> JettonPaymentTx | None:
+    async def get(self, nonce: str) -> JettonPaymentTx | None:
         return self._by_nonce.get(nonce.strip())
 
-    def consume(self, nonce: str) -> JettonPaymentTx | None:
+    async def consume(self, nonce: str) -> JettonPaymentTx | None:
         return self._by_nonce.pop(nonce.strip(), None)
 
     def _ingest_txs(self, txs, cutoff: float, new_lt_watermark: int) -> int:
@@ -176,6 +177,8 @@ class JettonWalletMonitor:
                         new_lt_watermark = await self._poll_tonapi(cutoff, new_lt_watermark)
                         tonapi_ok = True
                         logger.info("JettonWalletMonitor: TonAPI fallback poll succeeded")
+                    except TonAPIRateLimitError as rl:
+                        logger.warning("JettonWalletMonitor: TonAPI fallback %s", rl)
                     except Exception:
                         logger.exception("JettonWalletMonitor: TonAPI fallback failed too")
         finally:
@@ -189,7 +192,9 @@ class JettonWalletMonitor:
 
     async def _loop(self) -> None:
         cooldown = 2.0
+        poll_hard_timeout = max(self._poll_interval * 3, 30)
         while not self._stop.is_set():
+            self._last_loop_tick = time.time()
             self._force.clear()
             try:
                 await asyncio.wait_for(self._force.wait(), timeout=self._poll_interval)
@@ -198,7 +203,17 @@ class JettonWalletMonitor:
             if self._stop.is_set():
                 break
             start_ts = time.time()
-            await self._poll()
+            try:
+                await asyncio.wait_for(self._poll(), timeout=poll_hard_timeout)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "JettonWalletMonitor: _poll hard timeout after %ss, skipping cycle",
+                    poll_hard_timeout,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("JettonWalletMonitor: _poll raised, loop continues")
             elapsed = time.time() - start_ts
             if elapsed < cooldown:
                 await asyncio.sleep(cooldown - elapsed)

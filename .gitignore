@@ -25,6 +25,7 @@ sidecar/pytest-report.xml
 sidecar/htmlcov/
 .quotes_cache.db
 TASK_*
+tasks/
 orchestrator.log
 .agents
 .claude

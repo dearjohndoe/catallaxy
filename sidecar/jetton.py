@@ -11,6 +11,11 @@ JETTON_TRANSFER_OPCODE = 0x0F8A7EA5
 USDT_MASTER_MAINNET = "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs"
 USDT_MASTER_TESTNET = "kQD0GKBM8ZbryVk2aESmzfU6b9b_8era_IkvBSELujFZPsyy"
 
+USDT_JETTON_WALLET_CODE_HEX = (
+    "b5ee9c72010101010023000842028f452d7a4dfd74066b682365177259ed057344"
+    "35be76b5fd4bd5d8af2b7c3d68"
+)
+
 # Refund fee in micro-USDT (6 decimals). Jetton refund gas is paid in TONs, 
 # but we need to reserve some USDT to cover the refund fee when refunding jettons.
 USDT_REFUND_FEE = 100_000

@@ -145,9 +145,9 @@ async def test_wallet_monitor_get_and_consume_trim_whitespace():
     tx = _mk_tx(lt=10, now=int(time.time()), nonce="nonce-1")
     monitor._by_nonce["nonce-1"] = tx
 
-    assert monitor.get("  nonce-1  ") is tx
-    assert monitor.consume("nonce-1") is tx
-    assert monitor.get("nonce-1") is None
+    assert await monitor.get("  nonce-1  ") is tx
+    assert await monitor.consume("nonce-1") is tx
+    assert await monitor.get("nonce-1") is None
 
 
 async def test_wallet_monitor_poll_caches_new_transactions():
@@ -162,8 +162,8 @@ async def test_wallet_monitor_poll_caches_new_transactions():
     monitor = WalletMonitor(client=client, address="EQaddr")
     await monitor._poll()
 
-    assert monitor.get("nonce-a") is tx_a
-    assert monitor.get("nonce-b") is tx_b
+    assert await monitor.get("nonce-a") is tx_a
+    assert await monitor.get("nonce-b") is tx_b
     # The next poll starts from the highest LT we processed.
     assert monitor._last_processed_lt == 100
 
@@ -176,7 +176,7 @@ async def test_wallet_monitor_poll_skips_expired_txs():
 
     monitor = WalletMonitor(client=client, address="EQaddr")
     await monitor._poll()
-    assert monitor.get("old-nonce") is None
+    assert await monitor.get("old-nonce") is None
 
 
 async def test_wallet_monitor_poll_evicts_stale_cached_entries():
@@ -245,8 +245,8 @@ async def test_payment_verifier_success():
         nonce="abc:sidecar", hash_hex="bb" * 32,
     )
     monitor = MagicMock()
-    monitor.get = MagicMock(return_value=tx)
-    monitor.consume = MagicMock(return_value=tx)
+    monitor.get = AsyncMock(return_value=tx)
+    monitor.consume = AsyncMock(return_value=tx)
     v._monitor = monitor
 
     result = await v.verify(tx_hash="user-supplied", raw_nonce="abc:sidecar")
@@ -263,8 +263,8 @@ async def test_payment_verifier_amount_below_min_rejected():
     v = PaymentVerifier(agent_wallet="EQw", min_amount=10_000, payment_timeout_seconds=300)
     tx = _mk_verified_tx(sender="EQsender", amount=9_999, now_ts=int(time.time()), nonce="n")
     v._monitor = MagicMock()
-    v._monitor.get = MagicMock(return_value=tx)
-    v._monitor.consume = MagicMock()
+    v._monitor.get = AsyncMock(return_value=tx)
+    v._monitor.consume = AsyncMock()
 
     with pytest.raises(PaymentVerificationError, match="lower than required"):
         await v.verify("tx", "n")
@@ -274,8 +274,8 @@ async def test_payment_verifier_min_amount_override():
     v = PaymentVerifier(agent_wallet="EQw", min_amount=1_000, payment_timeout_seconds=300)
     tx = _mk_verified_tx(sender="EQsender", amount=5_000, now_ts=int(time.time()), nonce="n")
     v._monitor = MagicMock()
-    v._monitor.get = MagicMock(return_value=tx)
-    v._monitor.consume = MagicMock()
+    v._monitor.get = AsyncMock(return_value=tx)
+    v._monitor.consume = AsyncMock()
 
     # Override with higher threshold — should reject.
     with pytest.raises(PaymentVerificationError, match="lower than required"):
@@ -287,8 +287,8 @@ async def test_payment_verifier_session_expired():
     stale_ts = int(time.time()) - 120
     tx = _mk_verified_tx(sender="EQsender", amount=5000, now_ts=stale_ts, nonce="n")
     v._monitor = MagicMock()
-    v._monitor.get = MagicMock(return_value=tx)
-    v._monitor.consume = MagicMock()
+    v._monitor.get = AsyncMock(return_value=tx)
+    v._monitor.consume = AsyncMock()
 
     with pytest.raises(PaymentVerificationError, match="session expired"):
         await v.verify("tx", "n")
@@ -300,8 +300,8 @@ async def test_payment_verifier_missing_sender_rejected():
     # Force sender extraction to fail.
     tx.in_msg.info.src.to_str = MagicMock(side_effect=RuntimeError("bad addr"))
     v._monitor = MagicMock()
-    v._monitor.get = MagicMock(return_value=tx)
-    v._monitor.consume = MagicMock()
+    v._monitor.get = AsyncMock(return_value=tx)
+    v._monitor.consume = AsyncMock()
 
     with pytest.raises(PaymentVerificationError, match="sender is missing"):
         await v.verify("tx", "n")
@@ -310,7 +310,7 @@ async def test_payment_verifier_missing_sender_rejected():
 async def test_payment_verifier_timeout_when_tx_never_appears(monkeypatch):
     v = PaymentVerifier(agent_wallet="EQw", min_amount=1000, payment_timeout_seconds=300)
     monitor = MagicMock()
-    monitor.get = MagicMock(return_value=None)
+    monitor.get = AsyncMock(return_value=None)
     monitor.force = MagicMock()
     v._monitor = monitor
 
@@ -330,8 +330,8 @@ async def test_payment_verifier_amount_extraction_failure_defaults_to_zero():
     # Break amount extraction: `int(...)` on a non-numeric will raise inside the try.
     tx.in_msg.info.value = SimpleNamespace(grams="not-a-number")
     v._monitor = MagicMock()
-    v._monitor.get = MagicMock(return_value=tx)
-    v._monitor.consume = MagicMock()
+    v._monitor.get = AsyncMock(return_value=tx)
+    v._monitor.consume = AsyncMock()
 
     with pytest.raises(PaymentVerificationError, match="lower than required"):
         await v.verify("tx", "n")

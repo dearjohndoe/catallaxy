@@ -279,7 +279,7 @@ async def _recover_payment_info(app: "SidecarApp", entry: PendingRefund) -> bool
         await asyncio.sleep(2)
         from payments import parse_nonce
         nonce_value = parse_nonce(entry.nonce).value
-        cached = monitor.get(nonce_value)
+        cached = await monitor.get(nonce_value)
         if cached is None:
             return False
         await app.refund_queue.update_payment_info(
@@ -295,7 +295,7 @@ async def _recover_payment_info(app: "SidecarApp", entry: PendingRefund) -> bool
         await asyncio.sleep(2)
         from payments import parse_nonce
         nonce_value = parse_nonce(entry.nonce).value
-        tx = monitor.get(nonce_value)
+        tx = await monitor.get(nonce_value)
         if tx is None:
             return False
         try:

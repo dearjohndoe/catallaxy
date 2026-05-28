@@ -110,8 +110,8 @@ async def test_jetton_verifier_success_returns_onchain_hash():
     entry = _jpx(amount=2_000_000, sender="EQpayer", now_ts=int(time.time()),
                  nonce="abc:sid-test", hash_hex="dd" * 32)
     monitor = MagicMock()
-    monitor.get = MagicMock(return_value=entry)
-    monitor.consume = MagicMock(return_value=entry)
+    monitor.get = AsyncMock(return_value=entry)
+    monitor.consume = AsyncMock(return_value=entry)
     v._monitor = monitor
 
     result = await v.verify(tx_hash="user-supplied", raw_nonce="abc:sid-test")
@@ -131,8 +131,8 @@ async def test_jetton_verifier_amount_below_min_rejected():
     v = _verifier(min_amount=2_000_000)
     entry = _jpx(amount=1_999_999, sender="EQpayer", now_ts=int(time.time()))
     v._monitor = MagicMock()
-    v._monitor.get = MagicMock(return_value=entry)
-    v._monitor.consume = MagicMock()
+    v._monitor.get = AsyncMock(return_value=entry)
+    v._monitor.consume = AsyncMock()
 
     with pytest.raises(PaymentVerificationError, match="lower than required"):
         await v.verify("tx", "n:sid-test")
@@ -144,8 +144,8 @@ async def test_jetton_verifier_min_amount_override_rejects():
     v = _verifier(min_amount=1_000)
     entry = _jpx(amount=5_000, sender="EQpayer", now_ts=int(time.time()))
     v._monitor = MagicMock()
-    v._monitor.get = MagicMock(return_value=entry)
-    v._monitor.consume = MagicMock()
+    v._monitor.get = AsyncMock(return_value=entry)
+    v._monitor.consume = AsyncMock()
 
     # Per-SKU override raises the bar above what was paid.
     with pytest.raises(PaymentVerificationError, match="lower than required"):
@@ -157,8 +157,8 @@ async def test_jetton_verifier_session_expired():
     stale = _jpx(amount=2_000_000, sender="EQpayer",
                  now_ts=int(time.time()) - 120)
     v._monitor = MagicMock()
-    v._monitor.get = MagicMock(return_value=stale)
-    v._monitor.consume = MagicMock()
+    v._monitor.get = AsyncMock(return_value=stale)
+    v._monitor.consume = AsyncMock()
 
     with pytest.raises(PaymentVerificationError, match="session expired"):
         await v.verify("tx", "n:sid-test")
@@ -168,8 +168,8 @@ async def test_jetton_verifier_missing_sender_rejected():
     v = _verifier(min_amount=1_000)
     entry = _jpx(amount=2_000_000, sender="", now_ts=int(time.time()))
     v._monitor = MagicMock()
-    v._monitor.get = MagicMock(return_value=entry)
-    v._monitor.consume = MagicMock()
+    v._monitor.get = AsyncMock(return_value=entry)
+    v._monitor.consume = AsyncMock()
 
     with pytest.raises(PaymentVerificationError, match="sender is missing"):
         await v.verify("tx", "n:sid-test")
@@ -178,7 +178,7 @@ async def test_jetton_verifier_missing_sender_rejected():
 async def test_jetton_verifier_timeout_when_tx_never_appears(monkeypatch):
     v = _verifier(min_amount=1_000)
     monitor = MagicMock()
-    monitor.get = MagicMock(return_value=None)
+    monitor.get = AsyncMock(return_value=None)
     monitor.force = MagicMock()
     v._monitor = monitor
 
@@ -205,9 +205,9 @@ async def test_jetton_monitor_get_and_consume_trim_whitespace():
     entry = _jpx(amount=1, sender="EQp", now_ts=int(time.time()))
     m._by_nonce["nonce-1"] = entry
 
-    assert m.get("  nonce-1  ") is entry
-    assert m.consume("nonce-1 ") is entry
-    assert m.get("nonce-1") is None
+    assert await m.get("  nonce-1  ") is entry
+    assert await m.consume("nonce-1 ") is entry
+    assert await m.get("nonce-1") is None
 
 
 async def test_jetton_monitor_poll_caches_valid_notification():
@@ -220,7 +220,7 @@ async def test_jetton_monitor_poll_caches_valid_notification():
     m = _monitor(client)
     await m._poll()
 
-    cached = m.get("good:sid")
+    cached = await m.get("good:sid")
     assert cached is not None
     assert cached.amount == 3_000_000
     assert cached.nonce == "good:sid"
@@ -241,7 +241,7 @@ async def test_jetton_monitor_poll_rejects_tx_from_wrong_jetton_wallet():
     m = _monitor(client)
     await m._poll()
 
-    assert m.get("forged:sid") is None
+    assert await m.get("forged:sid") is None
 
 
 async def test_jetton_monitor_poll_skips_unresolvable_src():
@@ -252,7 +252,7 @@ async def test_jetton_monitor_poll_skips_unresolvable_src():
 
     m = _monitor(client)
     await m._poll()
-    assert m.get("x:sid") is None
+    assert await m.get("x:sid") is None
 
 
 async def test_jetton_monitor_poll_skips_notification_without_nonce():
@@ -286,7 +286,7 @@ async def test_jetton_monitor_poll_stops_at_already_processed_lt():
     m = _monitor(client)
     m._last_processed_lt = 50  # we already saw everything up to lt=50
     await m._poll()
-    assert m.get("old:sid") is None
+    assert await m.get("old:sid") is None
 
 
 async def test_jetton_monitor_poll_evicts_stale_cached_entries():

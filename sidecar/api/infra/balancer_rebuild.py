@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("sidecar")
 
 
-DEFAULT_INTERVAL_SEC = 4 * 60 * 60  # 4 hours
+DEFAULT_INTERVAL_SEC = 60 * 60 # 1 hour
 JITTER_FRACTION = 0.15  # ± 15 %
 
 

@@ -174,6 +174,26 @@ no effect. Per-agent isolation comes from a distinct `AGENT_NAME` (give each
 agent a unique name; unique `sku_id`s are also recommended). Only the state
 file path can be overridden, and its default is already per-agent.
 
+### Remote monitor (tonapi-relay)
+
+Optional. When `MONITOR_SERVICE_URL` env is set, the sidecar offloads
+on-chain watching to a separate **tonapi-relay** service. The sidecar:
+
+- Calls `POST {MONITOR_SERVICE_URL}/subscribe` at startup with its
+  `agent_wallet` and (if USDT is enabled) `jetton_wallet`.
+- During `verify()`, instead of polling LiteBalancer, it asks the relay
+  via `GET {MONITOR_SERVICE_URL}/tx/by_nonce?nonce=...&rail=...`.
+- Retries up to 3 times with 3-second sleeps between attempts to absorb
+  race conditions where the paid invoke arrives before the TonAPI webhook
+  reaches the relay.
+
+If `MONITOR_SERVICE_URL` is unset, the sidecar runs in legacy mode
+(LiteBalancer + TonAPI HTTP fallback) — fully backward-compatible.
+
+Use the relay when you have many sidecars on one host and want a single
+TonAPI webhook subscription instead of per-agent polling. See
+`tonapi-relay/` repo for the receiver side.
+
 ### Images
 
 Put files in `IMAGES_DIR` (default `./images/`) — they are served from your

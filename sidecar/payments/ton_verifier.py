@@ -8,6 +8,7 @@ from tonutils.clients import LiteBalancer
 from tonutils.types import NetworkGlobalID
 
 from .nonce import _parse_payment_nonce, parse_nonce
+from .remote_monitor import RemoteWalletMonitor, _RelayClient, get_relay_url
 from .ton_monitor import WalletMonitor
 from .tonapi_client import TonAPIClient
 from .types import PaymentVerificationError, VerifiedPayment
@@ -34,10 +35,25 @@ class PaymentVerifier:
         self._enforce_comment_nonce = enforce_comment_nonce
         self._network = NetworkGlobalID.TESTNET if testnet else NetworkGlobalID.MAINNET
         self._client: LiteBalancer | None = None
-        self._monitor: WalletMonitor | None = None
+        self._monitor: WalletMonitor | RemoteWalletMonitor | None = None
         self._tonapi_client = tonapi_client
+        # Shared aiohttp session for relay client, only used in remote mode.
+        self._relay_client: _RelayClient | None = None
 
     async def start(self) -> None:
+        relay_url = get_relay_url()
+        if relay_url:
+            self._relay_client = _RelayClient(relay_url)
+            await self._relay_client.subscribe(
+                agent_wallet=self._agent_wallet,
+                jetton_wallet=None,
+                label=None,
+            )
+            self._monitor = RemoteWalletMonitor(self._relay_client, self._agent_wallet)
+            await self._monitor.start()
+            logger.info("PaymentVerifier started in REMOTE mode via %s", relay_url)
+            return
+
         self._client = LiteBalancer.from_network_config(self._network)
         await self._client.connect()
         self._monitor = WalletMonitor(
@@ -53,6 +69,9 @@ class PaymentVerifier:
         if self._client:
             await self._client.close()
             self._client = None
+        if self._relay_client:
+            await self._relay_client.close()
+            self._relay_client = None
 
     def is_healthy(self, max_age_seconds: float = 60.0) -> bool:
         """Proxy to monitor.is_healthy. Unstarted verifier is never healthy."""
@@ -64,9 +83,10 @@ class PaymentVerifier:
         """Periodically swap the LiteBalancer to shed long-lived state.
 
         Monitor's `_by_nonce` cache and `_last_processed_lt` are preserved,
-        so inflight verify() loses at most one poll cycle.
+        so inflight verify() loses at most one poll cycle. In remote mode
+        there's no LiteBalancer to rebuild — this is a no-op.
         """
-        if self._monitor is None:
+        if self._monitor is None or self._client is None:
             return
         new_client = LiteBalancer.from_network_config(self._network)
         await new_client.connect()
@@ -88,7 +108,7 @@ class PaymentVerifier:
         deadline = time.time() + self.VERIFY_TIMEOUT
 
         while True:
-            tx = self._monitor.get(nonce.value)
+            tx = await self._monitor.get(nonce.value)
 
             if tx is not None:
                 now_ts = int(time.time())
@@ -111,10 +131,10 @@ class PaymentVerifier:
                 if not sender:
                     raise PaymentVerificationError("Transaction sender is missing")
 
-                comment = _parse_payment_nonce(tx.in_msg.body)
+                comment = _parse_payment_nonce(tx.in_msg.body) or nonce.value
                 # Evict nonce from cache and use the on-chain tx hash (not user-supplied)
                 # to prevent replay attacks with fake tx_hash values.
-                self._monitor.consume(nonce.value)
+                await self._monitor.consume(nonce.value)
                 real_tx_hash = tx.cell.hash.hex()
                 return VerifiedPayment(
                     tx_hash=real_tx_hash,
@@ -127,6 +147,7 @@ class PaymentVerifier:
             if time.time() >= deadline:
                 raise PaymentVerificationError("Transaction not found")
 
-            # Not in cache yet — force an immediate poll, then wait before retrying
+            # Not in cache yet — force an immediate poll, then wait before retrying.
+            # In remote mode `force()` is a no-op (relay polls on its own).
             self._monitor.force()
             await asyncio.sleep(self.VERIFY_POLL)

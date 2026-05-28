@@ -8,7 +8,7 @@ from pytoniq_core import Transaction
 from tonutils.clients import LiteBalancer
 
 from .nonce import _parse_payment_nonce
-from .tonapi_client import TonAPIClient
+from .tonapi_client import TonAPIClient, TonAPIRateLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ class WalletMonitor:
         self,
         client: LiteBalancer,
         address: str,
-        poll_interval: int = 10,
+        poll_interval: int = 30,
         tonapi_client: TonAPIClient | None = None,
     ) -> None:
         self._client = client
@@ -36,6 +36,7 @@ class WalletMonitor:
         self._tonapi_client = tonapi_client
         self._last_successful_poll_at: float = 0.0
         self._consecutive_lite_errors: int = 0
+        self._last_loop_tick: float = 0.0
 
     async def start(self) -> None:
         await self._poll()  # populate cache immediately before accepting requests
@@ -76,7 +77,7 @@ class WalletMonitor:
         """Wake the monitor to poll immediately."""
         self._force.set()
 
-    def is_healthy(self, max_age_seconds: float = 60.0) -> bool:
+    def is_healthy(self, max_age_seconds: float = 120.0) -> bool:
         """Has a successful poll completed within the staleness window?
 
         Used by the invoke handler (plan D) to return 503 on preflight when
@@ -87,10 +88,10 @@ class WalletMonitor:
             return False
         return (time.time() - self._last_successful_poll_at) < max_age_seconds
 
-    def get(self, nonce: str) -> Transaction | None:
+    async def get(self, nonce: str) -> Transaction | None:
         return self._by_nonce.get(nonce.strip())
 
-    def consume(self, nonce: str) -> Transaction | None:
+    async def consume(self, nonce: str) -> Transaction | None:
         """Atomically get and remove a cached transaction by nonce."""
         return self._by_nonce.pop(nonce.strip(), None)
 
@@ -166,6 +167,11 @@ class WalletMonitor:
                         new_lt_watermark = await self._poll_tonapi(cutoff, new_lt_watermark)
                         tonapi_ok = True
                         logger.info("WalletMonitor: TonAPI fallback poll succeeded")
+                    except TonAPIRateLimitError as rl:
+                        # Expected when the shared TONAPI_KEY hits its burst
+                        # limit — TonAPIClient sets a 60s cooldown and we just
+                        # back off; no traceback noise needed.
+                        logger.warning("WalletMonitor: TonAPI fallback %s", rl)
                     except Exception:
                         logger.exception("WalletMonitor: TonAPI fallback failed too")
         finally:
@@ -179,7 +185,9 @@ class WalletMonitor:
 
     async def _loop(self) -> None:
         cooldown = 2.0  # minimum seconds between polls to prevent LiteServer spam
+        poll_hard_timeout = max(self._poll_interval * 3, 30)
         while not self._stop.is_set():
+            self._last_loop_tick = time.time()
             self._force.clear()
             try:
                 await asyncio.wait_for(self._force.wait(), timeout=self._poll_interval)
@@ -189,7 +197,17 @@ class WalletMonitor:
                 break
 
             start_ts = time.time()
-            await self._poll()
+            try:
+                await asyncio.wait_for(self._poll(), timeout=poll_hard_timeout)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "WalletMonitor: _poll hard timeout after %ss, skipping cycle",
+                    poll_hard_timeout,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("WalletMonitor: _poll raised, loop continues")
 
             elapsed = time.time() - start_ts
             if elapsed < cooldown:
