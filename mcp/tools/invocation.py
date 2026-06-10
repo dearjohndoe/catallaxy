@@ -22,7 +22,7 @@ def register_invocation_tools(mcp: FastMCP) -> None:
         user_address: required when rail="USDT" — your wallet address (for USDT refunds).
         Returns payment_options (all available rails) plus ready-to-use payload for chosen rail.
         """
-        payload: dict = {"capability": capability, "body": body}
+        payload: dict = {"capability": capability, "body": body, "rail": rail}
         if quote_id:
             payload["quote_id"] = quote_id
         if sku:
@@ -122,14 +122,22 @@ def register_invocation_tools(mcp: FastMCP) -> None:
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=60),
             ) as resp:
+                http_status = resp.status
                 data = await resp.json()
 
-        if data.get("status") == "done":
+        status = data.get("status")
+        if status == "done":
             return {"status": "done", "result": data.get("result"), "job_id": data.get("job_id")}
+        if status == "refunded":
+            return data
 
         job_id = data.get("job_id") or data.get("id")
-        if not job_id or not auto_poll:
-            return {"status": data.get("status", "pending"), "job_id": job_id, "poll_endpoint": f"GET /result/{job_id}"}
+        if http_status >= 400 or "error" in data:
+            raise ValueError(f"invoke failed (HTTP {http_status}): {data}")
+        if not job_id:
+            raise ValueError(f"invoke returned no job_id (HTTP {http_status}): {data}")
+        if not auto_poll:
+            return {"status": status or "pending", "job_id": job_id, "poll_endpoint": f"GET /result/{job_id}"}
 
         # auto poll
         deadline = asyncio.get_event_loop().time() + poll_timeout
@@ -142,7 +150,7 @@ def register_invocation_tools(mcp: FastMCP) -> None:
                 ) as resp:
                     result = await resp.json()
                 status = result.get("status")
-                if status in ("done", "error"):
+                if status in ("done", "error", "refunded"):
                     return result
         return {"status": "pending", "job_id": job_id, "error": "poll_timeout"}
 

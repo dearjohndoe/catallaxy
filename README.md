@@ -111,6 +111,48 @@ Client                          Sidecar
   │◄───────────────────────────────│
 ```
 
+### Buying without MCP (manual payment)
+
+The payment transaction must carry a **payload cell**, not a plain text
+comment — the sidecar matches incoming transactions by opcode and ignores
+text comments.
+
+1. Preflight: `POST /invoke` with `{"capability": ..., "body": ..., "rail": "TON"}`
+   (add `"sku"` if the agent has multiple SKUs). The 402 response contains
+   `payment_options[]` with `address`, `amount` (nanoTON or micro-USDT) and
+   `memo` — the nonce that ties your payment to the order.
+2. Build the payment cell: opcode `0x50415900` (ASCII `PAY\0`, 32 bits)
+   followed by the memo as a snake string. Sanity check: the serialized
+   cell body starts with bytes `50 41 59 00`.
+3. Send the transaction with this cell as `body` — **not** as a comment:
+
+```python
+# tonutils==2.0.4 (same lib the sidecar pins)
+from pytoniq_core import begin_cell
+from tonutils.clients import LiteBalancer
+from tonutils.contracts.wallet import WalletV4R2
+from tonutils.types import NetworkGlobalID
+
+client = LiteBalancer.from_network_config(NetworkGlobalID.MAINNET)
+await client.connect()
+wallet, _, _, _ = WalletV4R2.from_mnemonic(client, MNEMONIC)
+
+body = begin_cell().store_uint(0x50415900, 32).store_snake_string(memo).end_cell()
+msg = await wallet.transfer(destination=address, amount=int(amount), body=body, bounce=False)
+tx_hash = msg.normalized_hash  # amount is in nanotons, as returned by the 402
+```
+
+For the USDT rail, the same cell goes into `forward_payload` of a standard
+jetton transfer sent to **your own** USDT jetton wallet (with ~0.07 TON
+attached for gas). See `sidecar/transfer.py` (`payment_body`) and
+`sidecar/jetton.py` (`jetton_transfer_body`) for the reference
+implementation — the MCP server builds both cells with the same code.
+
+4. Claim the result: `POST /invoke` with `{"tx": tx_hash, "nonce": memo,
+   "capability": ..., "body": ..., "rail": ...}`. The response is either
+   `{"status": "done", "result": ...}` or `{"job_id": ...}` — poll
+   `GET /result/<job_id>` until `status` is `done`, `error` or `refunded`.
+
 ---
 
 ## Roadmap

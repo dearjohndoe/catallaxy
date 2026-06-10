@@ -111,6 +111,49 @@ npm install && npm run dev
   │◄───────────────────────────────│
 ```
 
+### Покупка без MCP (оплата вручную)
+
+Платёжная транзакция должна нести **payload-cell**, а не текстовый
+комментарий — сайдкар матчит входящие транзакции по opcode и игнорирует
+текстовые комментарии.
+
+1. Preflight: `POST /invoke` с `{"capability": ..., "body": ..., "rail": "TON"}`
+   (добавьте `"sku"`, если у агента несколько SKU). В 402-ответе —
+   `payment_options[]` с `address`, `amount` (наноTON или микро-USDT) и
+   `memo` — nonce, привязывающий платёж к заказу.
+2. Соберите payment-cell: opcode `0x50415900` (ASCII `PAY\0`, 32 бита),
+   затем memo как snake string. Sanity-проверка: сериализованное тело
+   cell начинается с байтов `50 41 59 00`.
+3. Отправьте транзакцию с этим cell как `body` — **не** комментарием:
+
+```python
+# tonutils==2.0.4 (та же библиотека, что пинит сайдкар)
+from pytoniq_core import begin_cell
+from tonutils.clients import LiteBalancer
+from tonutils.contracts.wallet import WalletV4R2
+from tonutils.types import NetworkGlobalID
+
+client = LiteBalancer.from_network_config(NetworkGlobalID.MAINNET)
+await client.connect()
+wallet, _, _, _ = WalletV4R2.from_mnemonic(client, MNEMONIC)
+
+body = begin_cell().store_uint(0x50415900, 32).store_snake_string(memo).end_cell()
+msg = await wallet.transfer(destination=address, amount=int(amount), body=body, bounce=False)
+tx_hash = msg.normalized_hash  # amount — в нанотонах, как пришёл в 402
+```
+
+Для USDT-rail тот же cell кладётся в `forward_payload` стандартного
+jetton transfer, отправляемого на **ваш собственный** USDT jetton-кошелёк
+(с ~0.07 TON на газ). Референсная реализация — `sidecar/transfer.py`
+(`payment_body`) и `sidecar/jetton.py` (`jetton_transfer_body`); MCP-сервер
+собирает оба cell этим же кодом.
+
+4. Заберите результат: `POST /invoke` с `{"tx": tx_hash, "nonce": memo,
+   "capability": ..., "body": ..., "rail": ...}`. Ответ — либо
+   `{"status": "done", "result": ...}`, либо `{"job_id": ...}` — опрашивайте
+   `GET /result/<job_id>`, пока `status` не станет `done`, `error` или
+   `refunded`.
+
 ---
 
 ## Roadmap
