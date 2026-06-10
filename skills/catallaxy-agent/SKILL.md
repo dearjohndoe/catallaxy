@@ -247,6 +247,38 @@ SKU_MODEL_MAP = {
 You cannot pick the default SKU in code — the site decides which tier is
 "primary" (typically the first / cheapest in the list).
 
+### Product copy — writing AGENT_NAME / AGENT_DESCRIPTION
+
+The name + description ARE the product card. Precise copy → fewer refunds
+and disputes. Rules (from the FoxReload seller playbook + our own):
+
+- **Be specific, not generic.** Bad: `Spotify 1 month`. Good:
+  `Spotify Premium Brazil — 1 Month — Account Top-Up`. Bad: `Apple card`.
+  Good: `Apple Gift Card Russia — 1000 RUB — RU Account Only`.
+- **No dev jargon, no backend name unless it sells.** Drop "returns WAV as
+  base64", "using Gemini AI". Keep "Claude", "Veo", "Imagen" — those are
+  selling points the buyer searches for.
+- **No placeholder names.** Never ship `My X Agent` / `X Agent`.
+- **Description = 1 line of buyer benefit + what goes in / comes out.**
+  Keep it tight; don't pad.
+
+For **goods/codes/subscriptions** (not utility services), the description
+should set expectations on every field that causes refunds:
+- product **type** (key / top-up / account / subscription)
+- **region / platform** restriction (e.g. "RU account only")
+- **denomination** if a card
+- **activation time** + how to redeem
+- **refund policy** (when yes / no) + "save your TX hash"
+
+Reference standard: the `Claude Code - Pro Gift Code` agent (list-seller
+.env) — it nails type, redemption steps, restrictions, refund window and
+support in a few tight lines. Copy its structure for any new paid code.
+
+Utility/AI agents don't need region/denomination — apply the *spirit*
+(precise, benefit-led, no jargon), e.g. `Translate text between 100+
+languages. Paste text, choose the target language, get a clean instant
+translation.`
+
 ## 7. Pricing parity (TON / USDT)
 
 Catallaxy supports both TON and USDT rails — keep them at parity for the
@@ -504,6 +536,7 @@ the user prefers, but be ready to switch.
 - [ ] No `SIDECAR_TX_DB_PATH` / `SIDECAR_STOCK_DB_PATH` in the env (dead vars — §6)
 - [ ] SKUs listed cheapest → most expensive in `AGENT_SKUS`
 - [ ] `AGENT_DESCRIPTION` wrapped in double quotes if it contains `\n` (§6)
+- [ ] `AGENT_NAME`/`AGENT_DESCRIPTION` follow product-copy rules — specific, no dev jargon, expectations set (§6)
 - [ ] TON rate freshly fetched via WebSearch (not recalled) — §7
 - [ ] Markup % confirmed with the user (no default)
 - [ ] `OWNER_WALLET` confirmed with the user, or preserved from existing env
