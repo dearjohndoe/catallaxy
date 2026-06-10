@@ -17,7 +17,12 @@ logger = logging.getLogger(__name__)
 
 
 class PaymentVerifier:
-    VERIFY_TIMEOUT = 15   # seconds to wait for tx to appear on-chain
+    VERIFY_TIMEOUT = 15   # local mode: liteserver polled directly, fail fast
+    # Remote mode: tx arrives via relay (TonAPI webhook). End-to-end latency
+    # (on-chain → TonAPI index → webhook delivery → relay get_transaction
+    # retries) can run 20-30s, well past the local 15s. Poll the relay longer
+    # since it's a cheap localhost call and the relay WILL get the tx.
+    REMOTE_VERIFY_TIMEOUT = 50
     VERIFY_POLL    = 0.5  # seconds between cache re-checks while waiting
 
     def __init__(
@@ -105,7 +110,8 @@ class PaymentVerifier:
 
         nonce = parse_nonce(raw_nonce)
         required_amount = min_amount if min_amount is not None else self._min_amount
-        deadline = time.time() + self.VERIFY_TIMEOUT
+        timeout = self.REMOTE_VERIFY_TIMEOUT if self._relay_client is not None else self.VERIFY_TIMEOUT
+        deadline = time.time() + timeout
 
         while True:
             tx = await self._monitor.get(nonce.value)

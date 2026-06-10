@@ -66,41 +66,25 @@ async def test_remote_monitor_get_returns_cached_on_hit():
 
 
 @pytest.mark.asyncio
-async def test_remote_monitor_get_retries_three_times_with_sleep(monkeypatch):
-    # Simulate two misses then a hit; check we wait between attempts.
+async def test_remote_monitor_get_is_single_shot_no_internal_retry():
+    # get() does NOT retry internally — verify()'s deadline loop owns retries.
+    # A single miss returns None immediately after one relay call.
     relay = MagicMock()
-    relay.fetch_by_nonce = AsyncMock(
-        side_effect=[None, None, _relay_payload(nonce="late")],
-    )
-    sleeps: list[float] = []
-
-    async def fake_sleep(sec):
-        sleeps.append(sec)
-
-    monkeypatch.setattr("payments.remote_monitor.asyncio.sleep", fake_sleep)
-
+    relay.fetch_by_nonce = AsyncMock(return_value=None)
     m = RemoteWalletMonitor(relay, account_id="0:agent")
-    tx = await m.get("late")
-    assert tx is not None
-    # Two sleeps between three attempts
-    assert sleeps == [3.0, 3.0]
-    assert relay.fetch_by_nonce.await_count == 3
+    tx = await m.get("miss")
+    assert tx is None
+    assert relay.fetch_by_nonce.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_remote_monitor_get_returns_none_after_three_misses(monkeypatch):
+async def test_remote_monitor_get_hit_on_first_call():
     relay = MagicMock()
-    relay.fetch_by_nonce = AsyncMock(return_value=None)
-
-    async def fake_sleep(sec):
-        pass
-
-    monkeypatch.setattr("payments.remote_monitor.asyncio.sleep", fake_sleep)
-
+    relay.fetch_by_nonce = AsyncMock(return_value=_relay_payload(nonce="hit"))
     m = RemoteWalletMonitor(relay, account_id="0:agent")
-    tx = await m.get("never")
-    assert tx is None
-    assert relay.fetch_by_nonce.await_count == 3
+    tx = await m.get("hit")
+    assert tx is not None
+    assert relay.fetch_by_nonce.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -112,19 +96,12 @@ async def test_remote_monitor_consume_pops_from_cache():
     assert tx is not None
     consumed = await m.consume("x")
     assert consumed is tx
-    # Cache is now empty — next get() will round-trip to relay again.
+    # Cache is now empty — next get() round-trips to relay again (single-shot).
     relay.fetch_by_nonce.reset_mock()
-    relay.fetch_by_nonce.side_effect = [None, None, None]
-
-    async def fake_sleep(sec): pass
-    import payments.remote_monitor as rm
-    orig = rm.asyncio.sleep
-    rm.asyncio.sleep = fake_sleep  # type: ignore[assignment]
-    try:
-        again = await m.get("x")
-    finally:
-        rm.asyncio.sleep = orig  # type: ignore[assignment]
+    relay.fetch_by_nonce.return_value = None
+    again = await m.get("x")
     assert again is None
+    assert relay.fetch_by_nonce.await_count == 1
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@ class JettonPaymentVerifier:
     """Verifies incoming jetton (USDT) payments on the agent wallet."""
 
     VERIFY_TIMEOUT = 15
+    REMOTE_VERIFY_TIMEOUT = 50
     VERIFY_POLL = 0.5
 
     def __init__(
@@ -131,7 +132,8 @@ class JettonPaymentVerifier:
 
         nonce = parse_nonce(raw_nonce)
         required_amount = min_amount if min_amount is not None else self._min_amount
-        deadline = time.time() + self.VERIFY_TIMEOUT
+        timeout = self.REMOTE_VERIFY_TIMEOUT if self._relay_client is not None else self.VERIFY_TIMEOUT
+        deadline = time.time() + timeout
 
         while True:
             entry = await self._monitor.get(nonce.value)

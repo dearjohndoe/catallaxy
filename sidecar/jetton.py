@@ -16,9 +16,10 @@ USDT_JETTON_WALLET_CODE_HEX = (
     "35be76b5fd4bd5d8af2b7c3d68"
 )
 
-# Refund fee in micro-USDT (6 decimals). Jetton refund gas is paid in TONs, 
+# Refund fee in micro-USDT (6 decimals). Jetton refund gas is paid in TONs,
 # but we need to reserve some USDT to cover the refund fee when refunding jettons.
-USDT_REFUND_FEE = 100_000
+# Kept symbolic to match the TON rail's ~0.0005 TON (~$0.001) withholding.
+USDT_REFUND_FEE = 1_000
 
 
 @dataclass

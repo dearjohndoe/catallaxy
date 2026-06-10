@@ -1212,3 +1212,27 @@ async def test_invoke_preflight_dynamic_sku_shows_fetched_price(app_factory, tmp
         option = data["payment_options"][0]
         assert option["amount"] == "50000000000"
         assert resp.headers["x-ton-pay-amount"] == "50000000000"
+
+
+async def test_invoke_preflight_dynamic_sku_unpriced_returns_409(app_factory, tmp_path, monkeypatch):
+    """ Dynamic SKU the agent omits from mode=prices (out of stock
+    upstream) must yield 409 out_of_stock, NOT a 402 with empty payment_options
+    (which crashes price-less clients)."""
+    app, tc = await _dynamic_test_client(app_factory, tmp_path, ["premium_3m", "premium_6m"])
+
+    async def fake_run(**kwargs):
+        # Agent returns a price ONLY for premium_3m; premium_6m omitted (no stock).
+        return {"prices": {"premium_3m": {"ton": 50_000_000_000}}}
+
+    monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
+
+    async with tc as c:
+        # Priced SKU still works.
+        ok = await c.post("/invoke", json={"capability": "translate", "sku": "premium_3m"})
+        assert ok.status == 402
+        # Unpriced SKU → 409 out_of_stock, not a broken empty 402.
+        resp = await c.post("/invoke", json={"capability": "translate", "sku": "premium_6m"})
+        assert resp.status == 409
+        data = await resp.json()
+        assert data["error"] == "out_of_stock"
+        assert data["sku"] == "premium_6m"

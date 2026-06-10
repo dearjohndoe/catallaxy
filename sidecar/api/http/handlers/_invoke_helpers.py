@@ -144,6 +144,17 @@ async def build_402_response(
             "token": {"symbol": "USDT", "master": usdt_master, "decimals": 6},
         })
 
+    # This happens when an SKU uses dynamic pricing and the agent omitted it from
+    # `mode=prices` — typically because it's out of stock upstream. Emitting a
+    # 402 with empty payment_options makes price-less clients build a payment
+    # from undefined address/amount and crash; report out_of_stock instead.
+    if not payment_options:
+        logger.info(
+            "preflight: no purchasable price for sku=%s (dynamic price unresolved) "
+            "— reporting out_of_stock", sku.sku_id,
+        )
+        return web.json_response({"error": "out_of_stock", "sku": sku.sku_id}, status=409)
+
     resp_body: dict[str, Any] = {
         "error": "Payment required",
         "payment_request": payment_options[0] if payment_options else {},

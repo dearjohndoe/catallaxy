@@ -23,12 +23,6 @@ from .types import JettonPaymentTx
 logger = logging.getLogger(__name__)
 
 
-# Per-call retry policy on /tx/by_nonce miss. The relay receives webhooks
-# ~1s after on-chain confirmation, but the user can hit /invoke milliseconds
-# after paying — give the relay time to catch up.
-DEFAULT_RETRY_COUNT = 3
-DEFAULT_RETRY_SLEEP_SEC = 3.0
-
 # Health-check cache: don't hit /health on every is_healthy() call,
 # verify() may call it inline. Refreshed lazily by an async helper.
 _HEALTH_CHECK_INTERVAL = 30.0
@@ -53,6 +47,23 @@ class _RelayClient:
         if s is not None and not s.closed:
             await s.close()
 
+    async def _reset_session(self) -> None:
+        """Drop the current session so the next call reconnects.
+
+        A session whose underlying keep-alive connection went stale is NOT
+        reported as ``closed``, so ``_ensure`` would otherwise keep reusing a
+        dead session forever — every request then times out and the remote
+        monitor latches unhealthy with no way to self-heal. Resetting here
+        forces ``_ensure`` to build a fresh session on the next call.
+        """
+        s = self._session
+        self._session = None
+        if s is not None and not s.closed:
+            try:
+                await s.close()
+            except Exception:
+                pass
+
     async def fetch_by_nonce(self, nonce: str, rail: str) -> Optional[dict[str, Any]]:
         s = await self._ensure()
         try:
@@ -69,6 +80,7 @@ class _RelayClient:
                 return await resp.json()
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.warning("relay /tx/by_nonce error: %s", e)
+            await self._reset_session()
             return None
 
     async def subscribe(
@@ -92,7 +104,9 @@ class _RelayClient:
                 if resp.status >= 400:
                     return None
                 return await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError):
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning("relay /health error: %s", e)
+            await self._reset_session()
             return None
 
 
@@ -217,6 +231,10 @@ class _BaseRemoteMonitor:
         """
         info = await self._relay.health()
         if info is None:
+            # The failed call above reset the session; retry once on a fresh
+            # connection so a single stale keep-alive doesn't latch unhealthy.
+            info = await self._relay.health()
+        if info is None:
             self._health_cache = (time.time(), False)
             return
         last_sync_at = info.get("last_sync_at") or 0
@@ -224,21 +242,23 @@ class _BaseRemoteMonitor:
         self._health_cache = (time.time(), ok)
 
     async def get(self, nonce: str) -> Optional[Any]:
+        """Single-shot lookup against the relay.
+
+        No internal retry/sleep: the caller (`PaymentVerifier.verify`) already
+        loops to its own deadline polling every VERIFY_POLL (~0.5s), so a tx
+        gets picked up within ~0.5s of landing in the relay instead of being
+        gated by a coarse multi-second internal retry. One retry layer, one
+        place that owns the timeout.
+        """
         nonce = nonce.strip()
         if nonce in self._by_nonce:
             return self._by_nonce[nonce]
-        # 3-attempt with 3-sec sleeps. Webhook usually lands within ~1s of tx,
-        # but the user can race it. By attempt 3 (~6s in) anything legitimate
-        # should be visible.
-        for attempt in range(DEFAULT_RETRY_COUNT):
-            data = await self._relay.fetch_by_nonce(nonce, self.RAIL)
-            if data is not None:
-                self._last_successful_poll_at = time.time()
-                wrapped = self._wrap(data)
-                self._by_nonce[nonce] = wrapped
-                return wrapped
-            if attempt < DEFAULT_RETRY_COUNT - 1:
-                await asyncio.sleep(DEFAULT_RETRY_SLEEP_SEC)
+        data = await self._relay.fetch_by_nonce(nonce, self.RAIL)
+        if data is not None:
+            self._last_successful_poll_at = time.time()
+            wrapped = self._wrap(data)
+            self._by_nonce[nonce] = wrapped
+            return wrapped
         return None
 
     async def consume(self, nonce: str) -> Optional[Any]:
