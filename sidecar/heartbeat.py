@@ -115,10 +115,30 @@ class HeartbeatManager:
             if valid:
                 payload["images"] = valid
 
-        encoded_len = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        def _encoded_len(p: dict[str, Any]) -> int:
+            return len(json.dumps(p, ensure_ascii=False).encode("utf-8"))
+
+        # When over budget, shed args_schema/result_schema FIRST: they can be
+        # large (e.g. long `select` option lists) and the marketplace refreshes
+        # them from the agent's live /info on every ping, so the heartbeat copy
+        # is not load-bearing. avatar_url/preview_url/images are heartbeat-only,
+        # so we keep them as long as possible.
+        if _encoded_len(payload) > MAX_PAYLOAD_BYTES:
+            for k in ("args_schema", "result_schema"):
+                if k in payload:
+                    payload.pop(k, None)
+                    logger.warning(
+                        "Heartbeat payload too large (>%d bytes); dropped %s "
+                        "(restored from /info ping)", MAX_PAYLOAD_BYTES, k,
+                    )
+                    if _encoded_len(payload) <= MAX_PAYLOAD_BYTES:
+                        break
+
+        # Still too large even without the schema → drop media as a last resort.
+        encoded_len = _encoded_len(payload)
         if encoded_len > MAX_PAYLOAD_BYTES:
             logger.warning(
-                "Heartbeat payload too large (%d bytes > %d); dropping media fields",
+                "Heartbeat payload still too large (%d bytes > %d); dropping media fields",
                 encoded_len, MAX_PAYLOAD_BYTES,
             )
             for k in ("preview_url", "avatar_url", "images"):
