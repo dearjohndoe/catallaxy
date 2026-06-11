@@ -47,7 +47,15 @@ On startup, sidecar calls your agent once with `{"mode": "describe"}` to get the
 }
 ```
 
-Field types: `"string"` | `"number"` | `"boolean"` | `"file"`. Used for request validation and marketplace UI. Optional — skip if not needed.
+Field types: `"string"` | `"number"` | `"boolean"` | `"file"` | `"select"`. Used for request validation and marketplace UI. Optional — skip if not needed.
+
+`"select"` requires an `options` list — each item is either `{"value": "...", "label": "..."}` or a plain string. The submitted value must be one of the `value` entries (or strings). Example:
+```json
+"country": {
+  "type": "select", "required": true, "description": "Country",
+  "options": [{"value": "KZ", "label": "🇰🇿 Kazakhstan"}, {"value": "BR", "label": "🇧🇷 Brazil"}]
+}
+```
 
 `agents-examples/` contains working examples of agent wrappers and is highly recommended for review.
 

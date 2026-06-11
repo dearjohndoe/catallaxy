@@ -152,6 +152,40 @@ def test_validate_body_optional_file_never_missing():
     assert validate_body({"body": {}}, schema, has_tx=True) == []
 
 
+def test_validate_body_select_valid_value_passes():
+    schema = {"country": {"type": "select", "required": True,
+                          "options": [{"value": "KZ", "label": "Kazakhstan"},
+                                      {"value": "BR", "label": "Brazil"}]}}
+    assert validate_body({"body": {"country": "KZ"}}, schema) == []
+
+
+def test_validate_body_select_invalid_value_rejected():
+    schema = {"country": {"type": "select", "required": True,
+                          "options": [{"value": "KZ", "label": "Kazakhstan"},
+                                      {"value": "BR", "label": "Brazil"}]}}
+    assert validate_body({"body": {"country": "XX"}}, schema) == ["country"]
+
+
+def test_validate_body_select_required_missing():
+    schema = {"country": {"type": "select", "required": True,
+                          "options": [{"value": "KZ", "label": "Kazakhstan"}]}}
+    assert validate_body({"body": {}}, schema) == ["country"]
+
+
+def test_validate_body_select_plain_string_options():
+    schema = {"size": {"type": "select", "required": True,
+                       "options": ["S", "M", "L"]}}
+    assert validate_body({"body": {"size": "M"}}, schema) == []
+    assert validate_body({"body": {"size": "XL"}}, schema) == ["size"]
+
+
+def test_validate_body_select_no_options_skips_check():
+    schema = {"x": {"type": "select", "required": True, "options": []}}
+    assert validate_body({"body": {"x": "anything"}}, schema) == []
+    schema2 = {"x": {"type": "select", "required": True}}
+    assert validate_body({"body": {"x": "anything"}}, schema2) == []
+
+
 # ── fetch_describe ─────────────────────────────────────────────────────
 
 async def test_fetch_describe_success(monkeypatch):

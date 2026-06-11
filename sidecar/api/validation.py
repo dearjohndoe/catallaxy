@@ -16,17 +16,34 @@ def validate_body(
 
     missing: list[str] = []
     for field, spec in args_schema.items():
-        if not spec.get("required"):
-            continue
-        if spec.get("type") == "file":
+        required = spec.get("required")
+        field_type = spec.get("type")
+
+        if field_type == "file":
+            if not required:
+                continue
             # Skip file validation on preflight (no tx) — file not sent yet
             if not has_tx:
                 continue
             if uploaded_files and field in uploaded_files:
                 continue
             missing.append(field)
-        elif field not in body:
-            missing.append(field)
+        elif field_type == "select":
+            if required and field not in body:
+                missing.append(field)
+                continue
+            if field in body:
+                options = spec.get("options")
+                if isinstance(options, list) and options:
+                    allowed = {
+                        (o["value"] if isinstance(o, dict) else o)
+                        for o in options
+                    }
+                    if body[field] not in allowed:
+                        missing.append(field)
+        else:
+            if required and field not in body:
+                missing.append(field)
     return missing
 
 
