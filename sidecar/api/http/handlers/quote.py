@@ -109,7 +109,7 @@ async def handle_quote(request: web.Request, sidecar: "SidecarApp") -> web.Respo
 
     if not parsed.capability:
         return web.json_response({"error": "capability is required"}, status=400)
-    if parsed.capability != sidecar.settings.capability:
+    if parsed.capability not in sidecar.settings.capabilities:
         return web.json_response({"error": "Unsupported capability"}, status=400)
 
     sku, sku_err = resolve_sku(

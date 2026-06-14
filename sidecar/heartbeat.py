@@ -43,7 +43,7 @@ class HeartbeatConfig:
     registry_address: str
     endpoint: str
     price: int
-    capability: str
+    capabilities: tuple[str, ...]
     name: str
     description: str
     args_schema: dict[str, Any]
@@ -76,7 +76,7 @@ class HeartbeatManager:
         payload: dict[str, Any] = {
             "name": self._config.name,
             "description": self._config.description,
-            "capabilities": [self._config.capability],
+            "capabilities": list(self._config.capabilities),
             "price": self._config.price,
             "endpoint": self._config.endpoint,
             "args_schema": self._config.args_schema,

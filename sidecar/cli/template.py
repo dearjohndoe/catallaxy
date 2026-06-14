@@ -1,5 +1,13 @@
 _CTLX_SUFFIX = "-ctlx-agent"
-_CAPABILITIES = ["translate", "summarize", "analyze", "generate", "classify", "qa", "code"]
+# Marketplace category slugs. Dotted slug = subcategory (games.topup → parent games).
+# An agent may declare several, comma-separated; the first one is primary.
+_CAPABILITIES = [
+    "games.topup", "games.keys", "games.accounts",
+    "subscriptions", "gift-cards", "telegram", "topup",
+    "esim", "prepaid", "software", "vpn",
+    "ai.chat", "ai.image", "ai.video", "tools",
+    "ton.analytics", "ton.infra", "services",
+]
 
 _AGENT_TEMPLATE = '''\
 import json

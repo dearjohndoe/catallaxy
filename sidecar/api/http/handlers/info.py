@@ -20,7 +20,7 @@ async def handle_info(_: web.Request, sidecar: "SidecarApp") -> web.Response:
     info: dict[str, Any] = {
         "name": settings.agent_name,
         "description": settings.agent_description,
-        "capabilities": [settings.capability],
+        "capabilities": list(settings.capabilities),
         "args_schema": sidecar.args_schema,
         "result_schema": sidecar.result_schema,
         "sidecar_id": sidecar.sidecar_id,

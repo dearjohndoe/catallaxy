@@ -19,7 +19,7 @@ def _make_config(**overrides) -> HeartbeatConfig:
         registry_address="EQregistry",
         endpoint="https://agent.test",
         price=1_000_000,
-        capability="translate",
+        capabilities=("translate",),
         name="Translator",
         description="Translates text",
         args_schema={"text": {"type": "string", "required": True}},
@@ -57,6 +57,15 @@ def test_build_payload_minimal(tmp_state_path):
     assert "has_quote" not in payload
     assert "sidecar_id" not in payload
     assert "result_schema" not in payload
+
+
+def test_build_payload_multiple_capabilities(tmp_state_path):
+    manager, _, _ = _make_manager(
+        tmp_state_path, capabilities=("games.topup", "games"),
+        sidecar_id=None, has_quote=False, result_schema=None,
+    )
+    payload = manager._build_payload()
+    assert payload["capabilities"] == ["games.topup", "games"]
 
 
 def test_build_payload_with_quote_and_id(tmp_state_path):

@@ -104,6 +104,27 @@ def test_load_settings_both_prices(clean_env, monkeypatch):
     assert s.agent_price_usdt == 500_000
 
 
+def test_load_settings_single_capability(clean_env, monkeypatch):
+    _apply_required(monkeypatch)
+    s = load_settings(env_file="/nonexistent/.env")
+    assert s.capabilities == ("translate",)
+    assert s.capability == "translate"
+
+
+def test_load_settings_multiple_capabilities(clean_env, monkeypatch):
+    _apply_required(monkeypatch, {"AGENT_CAPABILITY": "games.topup, games , games.topup,"})
+    s = load_settings(env_file="/nonexistent/.env")
+    # whitespace stripped, duplicates and empties dropped, order preserved
+    assert s.capabilities == ("games.topup", "games")
+    assert s.capability == "games.topup"
+
+
+def test_load_settings_blank_capability_raises(clean_env, monkeypatch):
+    _apply_required(monkeypatch, {"AGENT_CAPABILITY": " , ,"})
+    with pytest.raises(RuntimeError):
+        load_settings(env_file="/nonexistent/.env")
+
+
 def test_load_settings_defaults(clean_env, monkeypatch):
     _apply_required(monkeypatch)
     s = load_settings(env_file="/nonexistent/.env")

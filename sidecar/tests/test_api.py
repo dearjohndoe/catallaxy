@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+from contextlib import asynccontextmanager
 import json
 import time
 import uuid
@@ -41,7 +42,7 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
         rails.append("USDT")
     base = dict(
         agent_command="true",
-        capability="translate",
+        capabilities=("translate",),
         agent_name="Translator",
         agent_description="Translates text",
         agent_price=agent_price,
@@ -397,13 +398,12 @@ def _force_healthy_monitors(app: SidecarApp) -> None:
         app.jetton_verifier.is_healthy = lambda max_age_seconds=60.0: True  # type: ignore[method-assign]
 
 
-@pytest.fixture
-async def client(app_factory, tmp_path):
-    """Build a mocked SidecarApp and serve it via aiohttp TestClient.
+@asynccontextmanager
+async def _serve_app(app: SidecarApp):
+    """Serve a mocked SidecarApp via aiohttp TestClient.
 
     startup() is stubbed out so no TON liteservers or subprocesses are contacted.
     """
-    app = app_factory()
     app.args_schema = {"text": {"type": "string", "required": True}}
     _force_healthy_monitors(app)
 
@@ -424,6 +424,12 @@ async def client(app_factory, tmp_path):
 
     async with TestClient(TestServer(web_app)) as c:
         c.sidecar = app  # type: ignore[attr-defined]
+        yield c
+
+
+@pytest.fixture
+async def client(app_factory, tmp_path):
+    async with _serve_app(app_factory()) as c:
         yield c
 
 
@@ -462,6 +468,24 @@ async def test_invoke_missing_capability_returns_400(client):
 async def test_invoke_wrong_capability_returns_400(client):
     resp = await client.post("/invoke", json={"capability": "other"})
     assert resp.status == 400
+
+
+async def test_multi_capability_info_and_invoke(app_factory):
+    """An agent declaring several capabilities accepts any of them on invoke
+    and reports the full list in /info; unknown capabilities still get 400."""
+    app = app_factory(capabilities=("translate", "games.topup"), rate_limit_requests=100)
+    async with _serve_app(app) as client:
+        resp = await client.get("/info")
+        assert (await resp.json())["capabilities"] == ["translate", "games.topup"]
+
+        resp = await client.post("/invoke", json={"capability": "games.topup"})
+        assert resp.status == 402  # accepted → proceeds to payment preflight
+
+        resp = await client.post("/invoke", json={"capability": "translate"})
+        assert resp.status == 402
+
+        resp = await client.post("/invoke", json={"capability": "other"})
+        assert resp.status == 400
 
 
 async def test_invoke_preflight_returns_402_with_payment_info(client):

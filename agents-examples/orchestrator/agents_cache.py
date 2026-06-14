@@ -21,7 +21,7 @@ class AgentInfo:
     sidecar_id: str
     name: str
     description: str
-    capability: str
+    capability: str  # primary (first declared) — kept for backward compat
     price: int  # nanotons from heartbeat
     actual_price: int  # nanotons from 402 ping (0 if not pinged yet)
     endpoint: str
@@ -33,6 +33,7 @@ class AgentInfo:
     preview_url: str | None = None
     avatar_url: str | None = None
     images: tuple[str, ...] = field(default_factory=tuple)
+    capabilities: tuple[str, ...] = ()
 
 
 def _parse_heartbeat_body(body_b64: str) -> dict[str, Any] | None:
@@ -68,7 +69,8 @@ def _parse_tx(tx: dict[str, Any]) -> AgentInfo | None:
         if not payload or not payload.get("endpoint") or not payload.get("sidecar_id"):
             return None
 
-        caps = payload.get("capabilities") or ([payload["capability"]] if payload.get("capability") else [])
+        caps_raw = payload.get("capabilities") or ([payload["capability"]] if payload.get("capability") else [])
+        caps = tuple(str(c) for c in caps_raw if c) if isinstance(caps_raw, list) else ()
         capability = caps[0] if caps else ""
 
         raw_images = payload.get("images") or []
@@ -88,6 +90,7 @@ def _parse_tx(tx: dict[str, Any]) -> AgentInfo | None:
             preview_url=payload.get("preview_url") or None,
             avatar_url=payload.get("avatar_url") or None,
             images=images,
+            capabilities=caps,
         )
     except Exception:
         return None

@@ -32,14 +32,20 @@ def handle_init(args: argparse.Namespace, _prefill: dict[str, str] | None = None
         capability = prefill["capability"]
         print(f"Capability: {capability}")
     else:
-        print("\nCapability:")
+        print("\nCapability (category slug; several allowed, comma-separated, first = primary):")
         for i, c in enumerate(_CAPABILITIES, 1):
             print(f"  {i}) {c}")
-        cap_raw = input("Number or custom value: ").strip()
-        try:
-            capability = _CAPABILITIES[int(cap_raw) - 1]
-        except (ValueError, IndexError):
-            capability = cap_raw
+        cap_raw = input("Numbers or custom slugs (e.g. '1,4' or 'games.topup,games'): ").strip()
+        parts = []
+        for token in cap_raw.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                parts.append(_CAPABILITIES[int(token) - 1])
+            except (ValueError, IndexError):
+                parts.append(token)
+        capability = ",".join(dict.fromkeys(parts))
     if not capability:
         print("Capability is required")
         return 1

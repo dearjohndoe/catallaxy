@@ -170,7 +170,7 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
     try:
         if not parsed.capability:
             return web.json_response({"error": "capability is required"}, status=400)
-        if parsed.capability != sidecar.settings.capability:
+        if parsed.capability not in sidecar.settings.capabilities:
             return web.json_response({"error": "Unsupported capability"}, status=400)
 
         sku, sku_err = _resolve_sku_for_invoke(parsed, sidecar)

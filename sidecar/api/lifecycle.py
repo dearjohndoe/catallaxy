@@ -46,7 +46,7 @@ async def startup(app: "SidecarApp") -> None:
             registry_address=app.settings.registry_address,
             endpoint=app.settings.agent_endpoint,
             price=app.settings.agent_price,
-            capability=app.settings.capability,
+            capabilities=app.settings.capabilities,
             name=app.settings.agent_name,
             description=app.settings.agent_description,
             args_schema=app.args_schema,

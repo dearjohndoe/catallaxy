@@ -16,7 +16,7 @@ export const FIXTURES: SidecarFixture[] = [
       address: 'EQBvW8Z5huBkMJYdnfAEM5JqTNkuWX3diqYENkWsIL0XggGG',
       name: 'Stock Demo · Single SKU',
       description: 'Sells 10 widgets, decrements stock on every successful sale.',
-      capabilities: ['sell_widget'],
+      capabilities: ['sell_widget', 'widgets.premium'],
       argsSchema: {
         recipient: { type: 'string', description: 'Where to deliver', required: true },
       },

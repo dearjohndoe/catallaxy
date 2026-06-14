@@ -57,8 +57,8 @@ def text_comment_body(text: str) -> Cell:
 
 SEND_MAX_RETRIES = 3
 SEND_RETRY_DELAYS = [0.5, 2, 5]  # seconds between retries
-SEND_TOTAL_BUDGET_SEC = 30
-CONFIRM_TIMEOUT_SEC = 10
+SEND_TOTAL_BUDGET_SEC = 100  # mainnet liteserver indexing lag
+CONFIRM_TIMEOUT_SEC = 40  # mainnet: tx lands but liteserver get_transactions lags >10s
 CONFIRM_POLL_INTERVAL_SEC = 1
 
 

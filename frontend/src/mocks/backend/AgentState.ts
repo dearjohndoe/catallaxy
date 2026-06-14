@@ -163,7 +163,7 @@ export class AgentState {
 
   postQuote(req: { capability: string; sku?: string; body: any }) {
     if (!this.fx.agent.hasQuote) return { status: 404, body: { error: 'This agent does not support quotes' } }
-    if (req.capability !== this.fx.agent.capabilities[0]) {
+    if (!this.fx.agent.capabilities.includes(req.capability)) {
       return { status: 400, body: { error: 'Unsupported capability' } }
     }
     const sku = this.resolveSku(req.sku)
@@ -213,7 +213,7 @@ export class AgentState {
     rail?: string
     body: any
   }): { status: number; body: any } {
-    if (req.capability !== this.fx.agent.capabilities[0]) {
+    if (!this.fx.agent.capabilities.includes(req.capability)) {
       return { status: 400, body: { error: 'Unsupported capability' } }
     }
 

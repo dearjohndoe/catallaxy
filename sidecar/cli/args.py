@@ -64,7 +64,7 @@ def parse_cli_args() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argume
 
     scaffold_parser = subparsers.add_parser("scaffold", help="Create a new agent directory with starter files")
     scaffold_parser.add_argument("directory", help="Directory to create")
-    scaffold_parser.add_argument("--capability", default="", help="Pre-fill capability (e.g. translate)")
+    scaffold_parser.add_argument("--capability", default="", help="Pre-fill capability slug(s), comma-separated, first = primary (e.g. games.topup,games)")
     parser_map["scaffold"] = scaffold_parser
 
     help_parser = subparsers.add_parser("help", help="Show help")

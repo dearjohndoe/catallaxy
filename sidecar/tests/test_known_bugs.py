@@ -50,7 +50,7 @@ def _make_settings(tmp_path: Path, **overrides) -> Settings:
         rails.append("USDT")
     base = dict(
         agent_command="true",
-        capability="translate",
+        capabilities=("translate",),
         agent_name="Translator",
         agent_description="Translates text",
         agent_price=agent_price,
@@ -392,7 +392,7 @@ async def test_heartbeat_loop_respects_configured_interval(tmp_state_path):
     import inspect
 
     cfg = HeartbeatConfig(
-        registry_address="EQr", endpoint="https://e", price=1, capability="c",
+        registry_address="EQr", endpoint="https://e", price=1, capabilities=("c",),
         name="n", description="d", args_schema={}, has_quote=False,
         sidecar_id=None, result_schema=None,
     )

@@ -444,7 +444,7 @@ def test_handle_init_creates_env(tmp_path, monkeypatch, capsys):
         "Does stuff",           # description line 1
         "Second line",          # description line 2 (tests multi-line)
         _EOF,                   # Ctrl+D → end description
-        "1",                    # capability → translate
+        "1, games",             # capability → first slug from list + custom, comma-separated
         "0.01",                 # price in TON
         "",                     # price in USDT (optional when TON set)
         "https://example.com",  # endpoint
@@ -462,7 +462,8 @@ def test_handle_init_creates_env(tmp_path, monkeypatch, capsys):
     assert out_file.exists()
     content = out_file.read_text()
     assert "AGENT_NAME=Test Agent" in content
-    assert "AGENT_CAPABILITY=translate" in content
+    from cli.template import _CAPABILITIES
+    assert f"AGENT_CAPABILITY={_CAPABILITIES[0]},games" in content
     assert f"AGENT_PRICE={int(0.01 * 1_000_000_000)}" in content
     assert "AGENT_ENDPOINT=https://example.com" in content
     assert (out_file.stat().st_mode & 0o777) == 0o600

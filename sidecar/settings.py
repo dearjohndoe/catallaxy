@@ -34,7 +34,7 @@ class AgentSku:
 @dataclass
 class Settings:
     agent_command: str
-    capability: str
+    capabilities: tuple[str, ...]
     agent_name: str
     agent_description: str
     agent_price: int
@@ -73,12 +73,25 @@ class Settings:
     tg_bot_token: str | None
     tg_user_ids: tuple[int, ...]
 
+    @property
+    def capability(self) -> str:
+        """Primary capability — first in the declared list."""
+        return self.capabilities[0]
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
         return default
     return raw.lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_capabilities(raw: str) -> tuple[str, ...]:
+    """AGENT_CAPABILITY accepts a comma-separated list; first entry is primary."""
+    caps = tuple(dict.fromkeys(c.strip() for c in raw.split(",") if c.strip()))
+    if not caps:
+        raise RuntimeError("AGENT_CAPABILITY must contain at least one capability")
+    return caps
 
 
 def _derive_wallet_address(pk_hex: str, testnet: bool) -> str:
@@ -302,7 +315,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         )
     return Settings(
         agent_command=os.environ["AGENT_COMMAND"],
-        capability=os.environ["AGENT_CAPABILITY"],
+        capabilities=_parse_capabilities(os.environ["AGENT_CAPABILITY"]),
         agent_name=agent_name,
         agent_description=os.environ["AGENT_DESCRIPTION"],
         agent_price=agent_price,

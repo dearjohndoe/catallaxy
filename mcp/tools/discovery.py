@@ -40,6 +40,7 @@ def _agent_to_dict(a: AgentInfo, pinged: bool = False) -> dict[str, Any]:
         "name": a.name,
         "description": a.description,
         "capability": a.capability,
+        "capabilities": list(a.capabilities or ((a.capability,) if a.capability else ())),
         "price": a.price,
         "price_ton": price_ton,
         "endpoint": a.endpoint,
@@ -84,7 +85,8 @@ def register_discovery_tools(mcp: FastMCP) -> None:
         agents = await _fetch_agents_from_chain(base, REGISTRY_ADDRESS, api_key)
 
         if capability:
-            agents = [a for a in agents if a.capability == capability]
+            agents = [a for a in agents
+                      if capability in (a.capabilities or ((a.capability,) if a.capability else ()))]
 
         agents = agents[:limit]
 
