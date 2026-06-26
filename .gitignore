@@ -34,3 +34,6 @@ __pycache__
 
 # Python package metadata
 *.egg-info/
+
+# Local scratch / bug notes — not tracked
+TODO.md
