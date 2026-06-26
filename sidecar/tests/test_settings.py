@@ -486,3 +486,35 @@ def test_ton_refund_fee_alias_overrides_and_falls_back(clean_env, monkeypatch):
     monkeypatch.delenv("TON_REFUND_FEE_NANOTON", raising=False)
     monkeypatch.setenv("REFUND_FEE_NANOTON", "888")
     assert load_settings(env_file="/nonexistent/.env").refund_fee_nanoton == 888
+
+
+# ── AgentSku rail-price mapping (MULTICHAIN §3) ────────────────────────
+
+def _sku(price_ton, price_usd):
+    from settings import AgentSku, DEFAULT_SKU_ID
+    return AgentSku(sku_id=DEFAULT_SKU_ID, title="t",
+                    price_ton=price_ton, price_usd=price_usd, initial_stock=None)
+
+
+def test_sku_price_for_returns_rail_price():
+    sku = _sku(1_000_000, 2_000_000)
+    assert sku.price_for("TON") == 1_000_000
+    assert sku.price_for("USDT") == 2_000_000
+
+
+def test_sku_price_for_none_when_rail_unpriced_or_unknown():
+    sku = _sku(1_000_000, None)
+    assert sku.price_for("USDT") is None       # unpriced rail
+    assert sku.price_for("SOL") is None         # unknown rail
+
+
+def test_sku_prices_map_omits_unpriced_rails():
+    assert _sku(1_000_000, 2_000_000).prices == {"TON": 1_000_000, "USDT": 2_000_000}
+    assert _sku(1_000_000, None).prices == {"TON": 1_000_000}
+    assert _sku(None, 2_000_000).prices == {"USDT": 2_000_000}
+
+
+def test_sku_prices_includes_dynamic_sentinel_zero():
+    # 0 is the dynamic-pricing sentinel — present (priced), distinct from None.
+    assert _sku(0, None).prices == {"TON": 0}
+    assert _sku(0, None).price_for("TON") == 0

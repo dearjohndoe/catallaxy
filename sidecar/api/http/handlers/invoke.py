@@ -289,11 +289,10 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
                 return job_id
             return await wait_and_render(job_id, sidecar)
 
-        if parsed.rail == "TON" and sku.price_ton is None:
-            return web.json_response(
-                {"error": "unsupported_rail_for_sku", "sku": sku.sku_id, "rail": parsed.rail}, status=400,
-            )
-        if parsed.rail == "USDT" and sku.price_usd is None:
+        # Rail-agnostic guard: reject a configured rail this SKU doesn't price.
+        # (Scoped to known rails to preserve the prior behaviour for unknown
+        # rail strings; the literal "TON"/"USDT" pair is gone.)
+        if parsed.rail in sidecar.rails and sku.price_for(parsed.rail) is None:
             return web.json_response(
                 {"error": "unsupported_rail_for_sku", "sku": sku.sku_id, "rail": parsed.rail}, status=400,
             )

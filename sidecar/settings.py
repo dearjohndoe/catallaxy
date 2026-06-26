@@ -47,6 +47,23 @@ class AgentSku:
     initial_stock: int | None  # None => infinite (no stock tracking)
     kind: SkuKind = SkuKind.STATIC
 
+    # rail_id -> price. Generalizes the per-field price_ton/price_usd to a
+    # rail-keyed mapping (MULTICHAIN_PLAN.md §3) so rail-agnostic code (e.g. the
+    # /invoke rail guard) needn't branch on "TON"/"USDT". The two fields remain
+    # the backing store; Solana rails extend this map without new fields.
+    def price_for(self, rail_id: str) -> int | None:
+        """Price on ``rail_id`` (nanoton for TON, micro-USD for USDT), or None
+        if the rail isn't priced. A price of 0 is the dynamic-pricing sentinel."""
+        return {"TON": self.price_ton, "USDT": self.price_usd}.get(rail_id)
+
+    @property
+    def prices(self) -> dict[str, int]:
+        """rail_id -> price for every priced rail (unpriced rails omitted)."""
+        return {
+            r: p for r, p in (("TON", self.price_ton), ("USDT", self.price_usd))
+            if p is not None
+        }
+
 
 @dataclass
 class Settings:
