@@ -106,6 +106,31 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.lower() in {"1", "true", "yes", "on"}
 
 
+def _chain_env(chain: str, suffix: str, *legacy: str, default: str | None = None) -> str | None:
+    """Read a chain-scoped env var (MULTICHAIN_PLAN.md §3).
+
+    Prefers the per-chain name ``{CHAIN}_{SUFFIX}`` (e.g. ``TON_WALLET_PK``) and
+    falls back to the legacy unprefixed names for backward compatibility, so
+    existing deployments keep working. Returns ``default`` if none are set.
+    When Solana lands it reads the same way under ``SOL_*``.
+    """
+    val = os.getenv(f"{chain.upper()}_{suffix}")
+    if val is not None:
+        return val
+    for name in legacy:
+        v = os.getenv(name)
+        if v is not None:
+            return v
+    return default
+
+
+def _chain_env_bool(chain: str, suffix: str, *legacy: str, default: bool = False) -> bool:
+    raw = _chain_env(chain, suffix, *legacy)
+    if raw is None:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
 def _parse_capabilities(raw: str) -> tuple[str, ...]:
     """AGENT_CAPABILITY accepts a comma-separated list; first entry is primary."""
     caps = tuple(dict.fromkeys(c.strip() for c in raw.split(",") if c.strip()))
@@ -309,17 +334,19 @@ def load_settings(env_file: str | None = None) -> Settings:
         "AGENT_NAME",
         "AGENT_DESCRIPTION",
         "AGENT_ENDPOINT",
-        "AGENT_WALLET_PK",
     ]
     missing = [key for key in required_keys if not os.getenv(key)]
+    # TON chain key: per-chain TON_WALLET_PK, legacy AGENT_WALLET_PK.
+    agent_wallet_pk = _chain_env("TON", "WALLET_PK", "AGENT_WALLET_PK")
+    if not agent_wallet_pk:
+        missing.append("TON_WALLET_PK (or AGENT_WALLET_PK)")
     if missing:
         raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
 
     if not os.getenv("AGENT_PRICE") and not os.getenv("AGENT_PRICE_USD") and not os.getenv("AGENT_SKUS"):
         raise RuntimeError("Either AGENT_SKUS or AGENT_PRICE/AGENT_PRICE_USD must be set")
 
-    agent_wallet_pk = os.environ["AGENT_WALLET_PK"]
-    testnet = _env_bool("TESTNET", False)
+    testnet = _chain_env_bool("TON", "TESTNET", "TESTNET", default=False)
 
     raw_skus = os.getenv("AGENT_SKUS", "").strip()
     if raw_skus:
@@ -373,8 +400,8 @@ def load_settings(env_file: str | None = None) -> Settings:
         agent_endpoint=os.environ["AGENT_ENDPOINT"],
         agent_wallet=_derive_wallet_address(agent_wallet_pk, testnet),
         agent_wallet_pk=agent_wallet_pk,
-        agent_wallet_seed=os.getenv("AGENT_WALLET_SEED"),
-        registry_address=REGISTRY_ADDRESS,
+        agent_wallet_seed=_chain_env("TON", "WALLET_SEED", "AGENT_WALLET_SEED"),
+        registry_address=_chain_env("TON", "REGISTRY_ADDRESS", default=REGISTRY_ADDRESS),
         port=int(os.getenv("PORT", "8080")),
         payment_timeout=int(os.getenv("PAYMENT_TIMEOUT", "300")),
         sync_timeout=int(os.getenv("AGENT_SYNC_TIMEOUT", "30")),
@@ -385,7 +412,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         tx_db_path=f"processed_txs.{slug}.db",
         stock_db_path=f"stock.{slug}.db",
         enforce_comment_nonce=_env_bool("ENFORCE_COMMENT_NONCE", True),
-        refund_fee_nanoton=int(os.getenv("REFUND_FEE_NANOTON", "500000")),
+        refund_fee_nanoton=int(_chain_env("TON", "REFUND_FEE_NANOTON", "REFUND_FEE_NANOTON", default="500000")),
         refund_worker_interval=int(os.getenv("REFUND_WORKER_INTERVAL_SECONDS", "60")),
         refund_max_attempts=int(os.getenv("REFUND_MAX_ATTEMPTS", "10")),
         agent_price_usdt=agent_price_usdt,

@@ -435,3 +435,54 @@ def test_load_settings_free_claim_env(clean_env, monkeypatch):
     s = load_settings(env_file="/nonexistent/.env")
     assert s.free_claim_limit == 3
     assert s.free_claim_window_seconds == 86400
+
+
+# ── per-chain env aliases (TON_*) with legacy fallback (MULTICHAIN §3) ──
+
+TEST_PK_HEX_ALT = "b" * 64
+
+
+def test_ton_wallet_pk_alias_takes_precedence_over_legacy(clean_env, monkeypatch):
+    _apply_required(monkeypatch)  # sets legacy AGENT_WALLET_PK = "a"*64
+    monkeypatch.setenv("TON_WALLET_PK", TEST_PK_HEX_ALT)
+    s = load_settings(env_file="/nonexistent/.env")
+    assert s.agent_wallet_pk == TEST_PK_HEX_ALT
+
+
+def test_ton_wallet_pk_works_without_legacy(clean_env, monkeypatch):
+    _apply_required(monkeypatch, overrides={"AGENT_WALLET_PK": None})
+    monkeypatch.setenv("TON_WALLET_PK", TEST_PK_HEX_ALT)
+    s = load_settings(env_file="/nonexistent/.env")
+    assert s.agent_wallet_pk == TEST_PK_HEX_ALT
+
+
+def test_missing_both_wallet_pk_names_raises_mentioning_ton(clean_env, monkeypatch):
+    _apply_required(monkeypatch, overrides={"AGENT_WALLET_PK": None})
+    with pytest.raises(RuntimeError, match="TON_WALLET_PK"):
+        load_settings(env_file="/nonexistent/.env")
+
+
+def test_ton_testnet_alias_overrides_and_falls_back(clean_env, monkeypatch):
+    _apply_required(monkeypatch)
+    monkeypatch.setenv("TON_TESTNET", "true")
+    assert load_settings(env_file="/nonexistent/.env").testnet is True
+    # Falls back to legacy TESTNET when TON_TESTNET absent.
+    monkeypatch.delenv("TON_TESTNET", raising=False)
+    monkeypatch.setenv("TESTNET", "true")
+    assert load_settings(env_file="/nonexistent/.env").testnet is True
+
+
+def test_ton_registry_address_override(clean_env, monkeypatch):
+    _apply_required(monkeypatch)
+    monkeypatch.setenv("TON_REGISTRY_ADDRESS", "EQcustomregistry")
+    s = load_settings(env_file="/nonexistent/.env")
+    assert s.registry_address == "EQcustomregistry"
+
+
+def test_ton_refund_fee_alias_overrides_and_falls_back(clean_env, monkeypatch):
+    _apply_required(monkeypatch)
+    monkeypatch.setenv("TON_REFUND_FEE_NANOTON", "777")
+    assert load_settings(env_file="/nonexistent/.env").refund_fee_nanoton == 777
+    monkeypatch.delenv("TON_REFUND_FEE_NANOTON", raising=False)
+    monkeypatch.setenv("REFUND_FEE_NANOTON", "888")
+    assert load_settings(env_file="/nonexistent/.env").refund_fee_nanoton == 888

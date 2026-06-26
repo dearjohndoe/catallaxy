@@ -67,6 +67,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     for key in list(os.environ.keys()):
         if key.startswith(("AGENT_", "SIDECAR_", "REGISTRY_", "PAYMENT_", "JOBS_",
                            "FILE_STORE_", "RATE_LIMIT_", "TRUSTED_PROXY_", "REFUND_",
-                           "ENFORCE_COMMENT_NONCE", "TESTNET", "PORT", "TG_")):
+                           "ENFORCE_COMMENT_NONCE", "TESTNET", "PORT", "TG_",
+                           "TON_", "SOL_")):
             monkeypatch.delenv(key, raising=False)
     return monkeypatch
