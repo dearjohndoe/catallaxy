@@ -172,6 +172,28 @@ async def test_mark_failed_transient_truncates_long_error(rq):
     assert len((await rq.get("TX")).last_error) == 500
 
 
+# ── defer_pending (pre-claim backoff) ──────────────────────────────────
+
+
+async def test_defer_pending_records_error_and_backoff_without_claiming(rq):
+    await rq.enqueue(tx_hash="TX", nonce="n", rail="TON")  # still pending
+    before = int(time.time())
+    await rq.defer_pending("TX", "could not recover", backoff_seconds=30)
+    rec = await rq.get("TX")
+    assert rec.status == STATUS_PENDING
+    assert rec.last_error == "could not recover"
+    assert rec.next_attempt_at >= before + 30
+    assert rec.attempts == 0  # no claim happened
+
+
+async def test_defer_pending_noop_when_not_pending(rq):
+    await rq.enqueue(tx_hash="TX", nonce="n", rail="TON")
+    await rq.claim("TX")  # → refunding
+    await rq.defer_pending("TX", "e", backoff_seconds=10)
+    rec = await rq.get("TX")
+    assert rec.status == STATUS_REFUNDING and rec.last_error is None
+
+
 # ── mark_failed_permanent ──────────────────────────────────────────────
 
 

@@ -1042,9 +1042,9 @@ async def test_refund_worker_dedup_adopts_existing_onchain_hash(tmp_path, monkey
 
         monkeypatch.setattr(worker_module, "_acquire_lite_client", fake_client_ctx)
         monkeypatch.setattr(worker_module, "find_existing_refund_tx", fake_find)
-        monkeypatch.setattr(worker_module, "refund_user", fake_refund_user)
 
-        # Minimal fake app surface for _process_entry.
+        # Minimal fake app surface for _process_entry. The worker dispatches
+        # refunds through app.refund_user (→ rail.refund).
         app = SimpleNamespace(
             refund_queue=rq,
             tx_store=SimpleNamespace(is_processed=AsyncMock(return_value=False)),
@@ -1055,6 +1055,7 @@ async def test_refund_worker_dedup_adopts_existing_onchain_hash(tmp_path, monkey
             sidecar_id="sid-test",
             sender=None, _agent_jetton_wallet=None, verifier=None,
             testnet=False,
+            refund_user=fake_refund_user,
         )
         async def fake_balance_check(*a, **kw):
             return True, ""
@@ -1101,7 +1102,6 @@ async def test_refund_worker_first_attempt_skips_probe(tmp_path, monkeypatch):
         async def fake_refund_user(**kwargs):
             send_calls.append(kwargs)
             return "REFUND_TX_HASH"
-        monkeypatch.setattr(worker_module, "refund_user", fake_refund_user)
 
         async def fake_balance_check(*a, **kw):
             return True, ""
@@ -1117,6 +1117,7 @@ async def test_refund_worker_first_attempt_skips_probe(tmp_path, monkeypatch):
             sidecar_id="sid-test",
             sender=None, _agent_jetton_wallet=None, verifier=None,
             testnet=False,
+            refund_user=fake_refund_user,
         )
 
         await _process_entry(app, entry)

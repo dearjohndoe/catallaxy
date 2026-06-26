@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, AsyncIterator
 
 from payments import PendingRefund
 
-from api.domain.refund import find_existing_refund_tx, refund_user
+from api.domain.refund import find_existing_refund_tx
 
 if TYPE_CHECKING:
     from api.app import SidecarApp
@@ -198,7 +198,9 @@ async def _process_entry(app: "SidecarApp", entry: PendingRefund) -> None:
     if not entry.sender or entry.amount is None:
         recovered = await _recover_payment_info(app, entry)
         if not recovered:
-            await app.refund_queue.mark_failed_transient(
+            # Pre-claim failure: the entry is still 'pending', so defer it with
+            # backoff (mark_failed_transient would no-op on a non-'refunding' row).
+            await app.refund_queue.defer_pending(
                 entry.tx_hash,
                 "could not recover sender/amount from on-chain monitor",
                 _backoff_for_attempt(entry.attempts + 1),
@@ -211,7 +213,8 @@ async def _process_entry(app: "SidecarApp", entry: PendingRefund) -> None:
     # Sanity check: agent has enough balance to cover the refund.
     sufficient, balance_err = await _check_balance_for_refund(app, entry)
     if not sufficient:
-        await app.refund_queue.mark_failed_transient(
+        # Pre-claim failure (see defer_pending): entry is still 'pending'.
+        await app.refund_queue.defer_pending(
             entry.tx_hash,
             f"balance_check_failed: {balance_err}",
             _backoff_for_attempt(entry.attempts + 1),
@@ -227,11 +230,7 @@ async def _process_entry(app: "SidecarApp", entry: PendingRefund) -> None:
         return
 
     try:
-        refund_tx = await refund_user(
-            sender=app.sender,
-            agent_jetton_wallet=app._agent_jetton_wallet,
-            sidecar_id=app.sidecar_id,
-            refund_fee_nanoton=app.settings.refund_fee_nanoton,
+        refund_tx = await app.refund_user(
             recipient=entry.sender,
             payment_amount=entry.amount,
             original_tx_hash=entry.tx_hash,

@@ -28,7 +28,7 @@ class ChainRail(Protocol):
 
     Maps onto today's code as follows (to be unified during the wrap step):
     - ``verify``         ← ``PaymentVerifier.verify`` / ``JettonPaymentVerifier.verify``
-    - ``refund``         ← ``api.domain.refund.refund_user`` (rail branch)
+    - ``refund``         ← the per-rail refund send (formerly refund_user's branch)
     - ``payment_option`` ← the per-rail dict built in ``_invoke_helpers.build_402_response``
     - ``monitor_healthy``← ``*Verifier.is_healthy``
     """

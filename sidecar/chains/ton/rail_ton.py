@@ -1,15 +1,14 @@
 """TON native rail — ChainRail adapter over the existing TON payment engine.
 
-Step 3 of the multichain refactor (MULTICHAIN_PLAN.md). This wraps the pieces
-that today are scattered across ``PaymentVerifier``, ``_invoke_helpers`` and
-``api.domain.refund.refund_user`` into one object that satisfies
-``chains.base.ChainRail``. It is NOT yet wired into the handlers — step 4
-rewires ``build_402_response``/``verify_payment`` to iterate rail objects. Until
-then this is exercised only by unit tests.
+Step 3 of the multichain refactor (MULTICHAIN_PLAN.md). This gathers the pieces
+that used to be scattered across ``PaymentVerifier``, ``_invoke_helpers`` and
+the old ``refund_user`` into one object that satisfies ``chains.base.ChainRail``.
+The handlers now dispatch through these rail objects (steps 1-2): 402
+construction, the health gate, verify, and refund all route here.
 
 Behaviour is bit-for-bit with the current TON paths:
-- ``refund`` is the exact TON branch of ``refund_user`` (the per-rail dispatch
-  that the refactor eliminates — each rail now owns only its own refund).
+- ``refund`` is the exact TON branch of the former ``refund_user`` (the per-rail
+  dispatch the refactor eliminates — each rail now owns only its own refund).
 - ``payment_option`` is the TON dict built in ``build_402_response``.
 - ``rail_id``/the ``"rail"`` wire value stay ``"TON"``; migrating to the
   canonical lowercase scheme ("ton", "ton:usdt") is protocol-v2 work (plan §4).

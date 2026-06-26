@@ -57,6 +57,10 @@ async def worker_app(tmp_path):
         jetton_verifier=None,
         owner_bot=None,
         ensure_jetton_verifier=AsyncMock(return_value=False),
+        # Single refund dispatch point — the worker now calls app.refund_user,
+        # which delegates to the rail. Mocked here; rail.refund parity lives in
+        # tests/test_rails_ton.py.
+        refund_user=AsyncMock(return_value="REFUND_TX"),
     )
     yield app
     await rq.close()
@@ -64,12 +68,13 @@ async def worker_app(tmp_path):
 
 
 @pytest.fixture
-def patch_onchain(monkeypatch):
+def patch_onchain(monkeypatch, worker_app):
     """Patch the worker's on-chain helpers to safe, controllable stubs.
 
-    Returns the mocks so a test can tweak return values/side-effects.
+    Returns the mocks so a test can tweak return values/side-effects. The
+    refund mock is ``worker_app.refund_user`` (the worker's dispatch point).
     """
-    refund_user = AsyncMock(return_value="REFUND_TX")
+    refund_user = worker_app.refund_user  # AsyncMock from the worker_app fixture
     balance = AsyncMock(return_value=(True, ""))
     find_existing = AsyncMock(return_value=None)
 
@@ -77,7 +82,6 @@ def patch_onchain(monkeypatch):
     async def _fake_client(app):
         yield object()
 
-    monkeypatch.setattr(refund_worker, "refund_user", refund_user)
     monkeypatch.setattr(refund_worker, "_check_balance_for_refund", balance)
     monkeypatch.setattr(refund_worker, "find_existing_refund_tx", find_existing)
     monkeypatch.setattr(refund_worker, "_acquire_lite_client", lambda app: _fake_client(app))
@@ -205,12 +209,11 @@ async def test_process_entry_transient_when_recover_fails(worker_app, patch_onch
 
     patch_onchain.refund_user.assert_not_awaited()
     rec = await worker_app.refund_queue.get("TX4")
-    # Current behaviour: the entry reached _process_entry as 'pending' (never
-    # claimed yet), so mark_failed_transient — which updates only
-    # WHERE status='refunding' — is a no-op. Status stays 'pending' and
-    # last_error is NOT written. (Latent quirk: no backoff is applied here.)
+    # Pre-claim failure is deferred (defer_pending): entry stays 'pending' but
+    # the error is recorded and the retry is backed off (next_attempt_at > now).
     assert rec.status == "pending"
-    assert rec.last_error is None
+    assert "could not recover" in rec.last_error
+    assert rec.next_attempt_at > rec.created_at
 
 
 # ── _process_entry: balance gate ───────────────────────────────────────
@@ -224,11 +227,10 @@ async def test_process_entry_transient_when_balance_insufficient(worker_app, pat
 
     patch_onchain.refund_user.assert_not_awaited()
     rec = await worker_app.refund_queue.get("TX5")
-    # Same no-op-transient quirk as the recover-fail case: balance gate runs
-    # before claim(), so the entry is still 'pending' and mark_failed_transient
-    # (status='refunding' only) writes nothing. Refund is still skipped.
+    # Pre-claim failure deferred with backoff (defer_pending); refund skipped.
     assert rec.status == "pending"
-    assert rec.last_error is None
+    assert "balance_check_failed" in rec.last_error
+    assert rec.next_attempt_at > rec.created_at
 
 
 # ── _process_entry: claim race lost ────────────────────────────────────

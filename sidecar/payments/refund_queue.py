@@ -240,6 +240,32 @@ class RefundQueue:
         )
         await self._conn.commit()
 
+    async def defer_pending(
+        self, tx_hash: str, error: str, backoff_seconds: int,
+    ) -> None:
+        """Back off a still-``pending`` entry (record error, push next_attempt_at).
+
+        For pre-claim failures (sender/amount unrecoverable, balance check
+        failed): the entry was never claimed, so ``mark_failed_transient`` —
+        which only touches ``status='refunding'`` — would be a no-op and leave
+        the entry due immediately, retrying every tick with no backoff. This
+        keeps the entry pending but defers the retry. Attempts are not bumped
+        (no claim happened).
+        """
+        if not self._conn:
+            await self.init()
+        now = int(time.time())
+        await self._conn.execute(
+            """
+            UPDATE pending_refunds
+               SET last_error = ?,
+                   next_attempt_at = ?
+             WHERE tx_hash = ? AND status = 'pending'
+            """,
+            (error[:500], now + backoff_seconds, tx_hash),
+        )
+        await self._conn.commit()
+
     async def mark_failed_permanent(self, tx_hash: str, error: str) -> None:
         if not self._conn:
             await self.init()
