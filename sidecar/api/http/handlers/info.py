@@ -67,10 +67,14 @@ async def handle_info(_: web.Request, sidecar: "SidecarApp") -> web.Response:
             # advertises the global cap if one is set.
             entry["free"] = True
         else:
-            is_dynamic = sku_obj is not None and sku_obj.price_ton == 0 and sku_obj.price_usd == 0
+            # Per-rail: a rail priced 0 is dynamic (resolved via mode=prices);
+            # a rail priced >0 keeps its fixed amount. This allows mixed SKUs
+            # (one fixed rail + one floating rail) — not just all-dynamic ones.
+            ton_dynamic = sku_obj is not None and sku_obj.price_ton == 0
+            usd_dynamic = sku_obj is not None and sku_obj.price_usd == 0
 
-            price_ton = dp.get("ton", None if is_dynamic else v.price_ton)
-            price_usd = dp.get("usd", None if is_dynamic else v.price_usd)
+            price_ton = dp.get("ton") if ton_dynamic else v.price_ton
+            price_usd = dp.get("usd") if usd_dynamic else v.price_usd
 
             if price_ton is not None:
                 entry["price_ton"] = price_ton

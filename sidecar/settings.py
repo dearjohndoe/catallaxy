@@ -175,9 +175,12 @@ def _parse_sku_prices(price_spec: list[str], sku_id: str) -> tuple[int | None, i
     if price_ton is None and price_usd is None:
         raise RuntimeError(f"SKU '{sku_id}': at least one of ton/usd price required")
 
-    # Both rails priced 0 is the dynamic-pricing sentinel (same rule as the legacy
-    # has_dynamic_skus check) — kept identical so old configs behave unchanged.
-    kind = SkuKind.DYNAMIC if price_ton == 0 and price_usd == 0 else SkuKind.STATIC
+    # Any priced rail at 0 is the dynamic-pricing sentinel: that rail's price is
+    # resolved at runtime via mode=prices. A SKU may mix a fixed rail with a
+    # dynamic one (e.g. fixed USDT + floating TON anchored to a fiat price), so
+    # one rail == 0 is enough to make the SKU dynamic. Both-rails-0 (legacy
+    # rub_anchored) is just the all-dynamic special case of this rule.
+    kind = SkuKind.DYNAMIC if price_ton == 0 or price_usd == 0 else SkuKind.STATIC
 
     return price_ton, price_usd, kind
 

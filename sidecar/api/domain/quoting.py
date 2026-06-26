@@ -30,7 +30,9 @@ class DynamicPriceCache:
 
 
 def has_dynamic_skus(skus: list[AgentSku]) -> bool:
-    return any(s.price_ton == 0 and s.price_usd == 0 for s in skus)
+    # A SKU is dynamic if any priced rail uses the 0 sentinel. None means the
+    # rail is absent (or FREE) and never counts.
+    return any(s.price_ton == 0 or s.price_usd == 0 for s in skus)
 
 
 async def fetch_dynamic_prices(

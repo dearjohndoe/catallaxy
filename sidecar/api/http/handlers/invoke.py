@@ -92,7 +92,9 @@ async def _resolve_amounts(sku: AgentSku, sidecar: "SidecarApp") -> tuple[int, i
     """Return (eff_ton, eff_usd, min_ton, min_usdt). Dynamic SKUs hit the agent."""
     eff_ton = sku.price_ton or 0
     eff_usd = sku.price_usd or 0
-    if sku.price_ton == 0 and sku.price_usd == 0:
+    # Resolve only the rail(s) priced 0 (the dynamic sentinel); a fixed rail
+    # keeps its static amount. Supports mixed SKUs (one fixed + one floating).
+    if sku.price_ton == 0 or sku.price_usd == 0:
         try:
             prices = await fetch_dynamic_prices(
                 sidecar._dynamic_prices_cache,
@@ -101,8 +103,10 @@ async def _resolve_amounts(sku: AgentSku, sidecar: "SidecarApp") -> tuple[int, i
                 sidecar_id=sidecar.sidecar_id,
             )
             dp = prices.get(sku.sku_id, {})
-            eff_ton = dp.get("ton") or 0
-            eff_usd = dp.get("usd") or 0
+            if sku.price_ton == 0:
+                eff_ton = dp.get("ton") or 0
+            if sku.price_usd == 0:
+                eff_usd = dp.get("usd") or 0
         except Exception:
             logger.warning("Dynamic price fetch failed for SKU %s", sku.sku_id)
     return eff_ton, eff_usd, eff_ton or 0, eff_usd or 0

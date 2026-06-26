@@ -320,12 +320,35 @@ def test_load_settings_legacy_infinite_stock_when_unset(clean_env, monkeypatch):
 
 
 def test_load_settings_skus_zero_price_single_rail_allowed(clean_env, monkeypatch):
-    """price=0 on one rail is valid — means that rail has no static price."""
+    """price=0 on one rail is valid — that rail is resolved dynamically."""
     _apply_required(monkeypatch)
     monkeypatch.setenv("AGENT_SKUS", "basic:infinite:ton=0:usd=1000000")
     s = load_settings(env_file="/nonexistent/.env")
     assert s.skus[0].price_ton == 0
     assert s.skus[0].price_usd == 1_000_000
+
+
+def test_load_settings_skus_mixed_fixed_and_dynamic_rail_is_dynamic(clean_env, monkeypatch):
+    """One fixed rail + one 0-sentinel rail → DYNAMIC SKU (mixed pricing)."""
+    from settings import SkuKind
+    _apply_required(monkeypatch)
+    # fixed USDT (1.0) + floating TON (anchored to a fiat price at runtime)
+    monkeypatch.setenv("AGENT_SKUS", "basic:infinite:ton=0:usd=1000000")
+    s = load_settings(env_file="/nonexistent/.env")
+    assert s.skus[0].kind is SkuKind.DYNAMIC
+    assert set(s.payment_rails) == {"TON", "USDT"}
+
+
+def test_load_settings_skus_ton_only_dynamic_is_dynamic(clean_env, monkeypatch):
+    """TON-only rail at the 0 sentinel (no USDT rail) → DYNAMIC, TON rail only."""
+    from settings import SkuKind
+    _apply_required(monkeypatch)
+    monkeypatch.setenv("AGENT_SKUS", "basic:infinite:ton=0")
+    s = load_settings(env_file="/nonexistent/.env")
+    assert s.skus[0].price_ton == 0
+    assert s.skus[0].price_usd is None
+    assert s.skus[0].kind is SkuKind.DYNAMIC
+    assert set(s.payment_rails) == {"TON"}
 
 
 def test_load_settings_skus_zero_both_rails_is_dynamic_sentinel(clean_env, monkeypatch):
