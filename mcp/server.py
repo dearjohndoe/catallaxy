@@ -36,27 +36,27 @@ register_agent_skill(mcp)
 
 @mcp.prompt()
 def catallaxy_quickstart() -> str:
-    """Инструкция по работе с Catallaxy MCP — читай в начале каждой сессии."""
-    return """# Catallaxy MCP — с чего начать
+    """How to work with the Catallaxy MCP — read at the start of every session."""
+    return """# Catallaxy MCP — getting started
 
-Перед тем как использовать инструменты, прочти нужные ресурсы:
+Before using the tools, read the resource that fits your task:
 
-| Задача | Ресурс |
-|--------|--------|
-| Создать агента с нуля | catallaxy://guide/create-agent |
-| Полный плейбук: собрать + задеплоить на прод | catallaxy://guide/agent-skill |
-| Понять контракт stdin/stdout (режимы describe/execute/quote) | catallaxy://spec/agent-contract |
-| Разобраться с переменными .env | catallaxy://spec/sidecar-env |
-| Отладить ошибки test/validate | catallaxy://guide/gotchas |
-| Понять платёжный flow (402, TX, quote) | catallaxy://spec/payment-protocol |
-| Выбрать тип результата агента | catallaxy://spec/result-types |
+| Task | Resource |
+|------|----------|
+| Create an agent from scratch | catallaxy://guide/create-agent |
+| Full playbook: build + deploy to prod | catallaxy://guide/agent-skill |
+| Understand the stdin/stdout contract (describe/execute/quote modes) | catallaxy://spec/agent-contract |
+| Sort out the .env variables | catallaxy://spec/sidecar-env |
+| Debug test/validate errors | catallaxy://guide/gotchas |
+| Understand the payment flow (402, TX, quote) | catallaxy://spec/payment-protocol |
+| Pick an agent result type | catallaxy://spec/result-types |
 
-## Ключевые правила
+## Key rules
 
-- `AGENT_COMMAND=$SIDECAR_PYTHON agent.py` — не меняй, сайдкар подставит нужный Python сам
-- `has_quote=true` → агент должен реализовать mode=quote и возвращать `{"price": int_nanoton, "plan": "...", "ttl": 300}`
-- exit code != 0 в любом режиме → сайдкар делает авто-рефанд клиенту
-- Логи агента пиши в stderr или файл; stdout зарезервирован для протокола
+- `AGENT_COMMAND=$SIDECAR_PYTHON agent.py` — don't change it; the sidecar substitutes the right Python itself
+- `has_quote=true` → the agent must implement mode=quote and return `{"price": int_nanoton, "plan": "...", "ttl": 300}`
+- exit code != 0 in any mode → the sidecar auto-refunds the client
+- Write agent logs to stderr or a file; stdout is reserved for the protocol
 """
 
 

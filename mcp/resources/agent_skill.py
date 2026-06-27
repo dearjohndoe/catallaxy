@@ -25,7 +25,7 @@ _FALLBACK = (
 def register_agent_skill(mcp: FastMCP) -> None:
     @mcp.resource("catallaxy://guide/agent-skill")
     def agent_skill() -> str:
-        """Полный плейбук: собрать, задеплоить и проверить агента на проде (skills/catallaxy-agent)."""
+        """Full playbook: build, deploy and verify an agent on prod (skills/catallaxy-agent)."""
         try:
             return _SKILL_PATH.read_text(encoding="utf-8")
         except OSError:

@@ -4,7 +4,7 @@ import { TonConnectUIProvider } from '@tonconnect/ui-react'
 import { App } from './App'
 import './index.css'
 
-const manifestUrl = `https://dearjohndoe.github.io/ton-agents-marketplace/tonconnect-manifest.json`
+const manifestUrl = `https://dearjohndoe.github.io/catallaxy/tonconnect-manifest.json`
 
 async function bootstrap() {
   if (import.meta.env.VITE_USE_MOCK === 'true') {

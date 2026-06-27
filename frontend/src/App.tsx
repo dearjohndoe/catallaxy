@@ -26,8 +26,8 @@ function usePathname() {
 }
 
 function parseRoute(pathname: string): { type: 'home' } | { type: 'agent'; sidecarId: string } {
-  // Strip vite BASE_URL prefix so routing works both on / and /ton-agents-marketplace/
-  const base = import.meta.env.BASE_URL // e.g. '/' or '/ton-agents-marketplace/'
+  // Strip vite BASE_URL prefix so routing works both on / and /catallaxy/
+  const base = import.meta.env.BASE_URL // e.g. '/' or '/catallaxy/'
   const stripped = base.length > 1 && pathname.startsWith(base.slice(0, -1))
     ? pathname.slice(base.length - 1)
     : pathname
@@ -115,7 +115,7 @@ export function App() {
           </div>
           <div className="header-actions">
             <a
-              href="https://github.com/dearjohndoe/ton-agents-marketplace/tree/master/mcp"
+              href="https://github.com/dearjohndoe/catallaxy/tree/master/mcp"
               target="_blank"
               rel="noopener noreferrer"
               className="btn-agent"
@@ -156,7 +156,7 @@ export function App() {
             <a href="https://t.me/catallaxy_support_bot" target="_blank" rel="noopener noreferrer" className="footer-link" title="Support">
               <TgIcon /> <span>support</span>
             </a>
-            <a href="https://github.com/dearjohndoe/ton-agents-marketplace" target="_blank" rel="noopener noreferrer" className="footer-link" title="GitHub">
+            <a href="https://github.com/dearjohndoe/catallaxy" target="_blank" rel="noopener noreferrer" className="footer-link" title="GitHub">
               <GithubIcon /> <span>github</span>
             </a>
           </div>

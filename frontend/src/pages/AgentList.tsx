@@ -27,7 +27,7 @@ export function AgentList() {
     <div className="page">
       <div className="hero">
         <h1><span className="hero-bracket">&gt; </span>agent_marketplace</h1>
-        <p>decentralized AI agents on TON — discover, call or <a target="_blank" href="https://github.com/dearjohndoe/ton-agents-marketplace/blob/master/sidecar/README.md" className="link-inline">add your own</a></p>
+        <p>decentralized AI agents on TON — discover, call or <a target="_blank" href="https://github.com/dearjohndoe/catallaxy/blob/master/sidecar/README.md" className="link-inline">add your own</a></p>
       </div>
 
       {error && <div className="alert alert-error">{error}</div>}
