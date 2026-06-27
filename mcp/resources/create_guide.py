@@ -1,76 +1,77 @@
 from mcp.server.fastmcp import FastMCP
 
-CONTENT = """# Создание агента для Catallaxy — пошаговое руководство
+CONTENT = """# Creating a Catallaxy agent — step-by-step guide
 
 ## 1. Scaffold
 
-Используй tool `scaffold_agent` с параметрами:
-- name: kebab-case имя (my-translator)
-- capability: одно слово (translate)
-- description: описание для маркетплейса
-- price: цена в nanoTON (10000000 = 0.01 TON). Для динамической цены (has_quote=true) укажи 0.
-- price_usd: опц., цена в micro-USDT (1000000 = 1 USDT). Если задана — добавляется USDT-рейл.
-- args_schema: плоский dict `{field: {type, description, required: true}}`. UI ctlx.cc ждёт именно его. JSON Schema (`{type: "object", properties: ...}`) сайдкар поймёт, но форма на маркетплейсе сломается — scaffold_agent авто-конвертит, но в `agent.py` пиши сразу плоский.
+Use the `scaffold_agent` tool with these params:
+- name: kebab-case name (my-translator)
+- capability: one word (translate). AGENT_CAPABILITY also accepts a comma-separated list; the first entry is primary.
+- description: marketplace description
+- price: price in nanoTON (10000000 = 0.01 TON). For dynamic pricing (has_quote=true) pass 0.
+- price_usd: optional, price in micro-USDT (1000000 = 1 USDT). If set, a USDT rail is added.
+- args_schema: flat dict `{field: {type, description, required: true}}`. The ctlx.cc UI expects exactly this. JSON Schema (`{type: "object", properties: ...}`) is understood by the sidecar but breaks the marketplace form — scaffold_agent auto-converts it, but write the flat format directly in `agent.py`.
 - result_type: string | file | json | bagid | url
-- has_quote: true если цена зависит от аргументов (см. режим quote в agent-contract)
-- directory: путь куда положить файлы (по умолчанию agents-examples/{name})
+- result_mime_type: optional, required for result_type=file (e.g. image/png)
+- has_quote: true if the price depends on the arguments (see quote mode in agent-contract)
+- directory: where to write the files (default agents-examples/{name})
 
-Scaffold создаст `.env.example` с одним SKU `default` и infinite stock. Для нескольких SKU или конечного inventory отредактируй `AGENT_SKUS` в `.env` после scaffold (формат — `catallaxy://spec/sidecar-env`).
+Scaffold creates `.env.example` with a single SKU `default` and infinite stock. For multiple SKUs or finite inventory, edit `AGENT_SKUS` in `.env` after scaffold (format — `catallaxy://spec/sidecar-env`).
 
-## 2. Реализуй логику
+## 2. Implement the logic
 
-Открой `{directory}/agent.py` (путь возвращается в ответе scaffold_agent) и заполни секцию YOUR LOGIC HERE.
+Open `{directory}/agent.py` (the path is returned by scaffold_agent) and fill in the YOUR LOGIC HERE section.
 
-Если has_quote=true — реализуй также секцию quote mode (заглушка уже есть в файле).
+If has_quote=true, also implement the quote mode section (a stub is already in the file).
 
-## 3. Создай .env
+## 3. Create .env
 
-Скопируй .env.example в .env и заполни:
-- AGENT_WALLET_PK — приватный ключ кошелька (hex)
-- AGENT_ENDPOINT — публичный URL где будет доступен сайдкар
+Copy .env.example to .env and fill in:
+- TON_WALLET_PK (legacy: AGENT_WALLET_PK) — wallet private key (hex)
+- AGENT_ENDPOINT — public URL where the sidecar will be reachable
 
-AGENT_COMMAND=$SIDECAR_PYTHON — не трогай, сайдкар подставит нужный Python автоматически.
+AGENT_COMMAND=$SIDECAR_PYTHON — don't touch it; the sidecar substitutes the right Python automatically.
 
-## 4. Валидируй
+## 4. Validate
 
-Используй tool `validate_agent` — проверит все обязательные параметры и запустит describe mode.
+Use the `validate_agent` tool — it checks all required params and runs describe mode.
 
-## 5. Протестируй
+## 5. Test
 
-Используй tool `test_agent`:
-- agent_dir: путь к директории агента
-- test_body: тестовые аргументы
+Use the `test_agent` tool:
+- agent_dir: path to the agent directory
+- test_body: test arguments
 
-## 6. Деплой
+## 6. Deploy
 
-Используй tool `deploy_agent` — установит и запустит systemd сервис.
+Use the `deploy_agent` tool — it installs and starts the systemd service.
 
-ВАЖНО: флаг `--name` должен стоять ДО subcommand:
+IMPORTANT: the `--name` flag must come BEFORE the subcommand:
 ```bash
-# Правильно:
+# Correct:
 sidecar.py service --name my-agent install
 
-# Неправильно (ошибка):
+# Wrong (error):
 sidecar.py service install --name my-agent
 ```
 
-## 7. Мониторинг
+## 7. Monitor
 
-- `agent_status` — статус сервиса
-- `agent_logs` — логи
-- `stop_agent` — остановить
+- `agent_status` — service status
+- `agent_logs` — logs
+- `stop_agent` — stop it
 
-## Архитектура агента (stdin/stdout)
+## Agent architecture (stdin/stdout)
 
-Агент читает JSON из stdin и пишет JSON в stdout.
-При ошибке — пишет в stderr и завершается с exit code != 0.
-Сайдкар автоматически делает refund при ошибке агента.
+The agent reads JSON from stdin and writes JSON to stdout.
+On error it writes to stderr and exits with exit code != 0.
+The sidecar auto-refunds the client when the agent errors.
 
-Полный контракт: catallaxy://spec/agent-contract
+Full contract: catallaxy://spec/agent-contract
 """
 
 def register_create_guide(mcp: FastMCP) -> None:
     @mcp.resource("catallaxy://guide/create-agent")
     def create_guide() -> str:
-        """Пошаговое руководство: scaffold → реализация → .env → validate → test → deploy."""
+        """Step-by-step guide: scaffold → implement → .env → validate → test → deploy."""
         return CONTENT

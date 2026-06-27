@@ -1,14 +1,14 @@
 from mcp.server.fastmcp import FastMCP
 
-CONTENT = """# Известные грабли при разработке агентов
+CONTENT = """# Known gotchas when building agents
 
-## test_agent / validate_agent используют AGENT_COMMAND из .env
+## test_agent / validate_agent use AGENT_COMMAND from .env
 
-`run_agent` читает `AGENT_COMMAND` из `.env` агента и подставляет
-`$SIDECAR_PYTHON` → `sys.executable` сервера MCP.
-Убедись что `.env` существует и `AGENT_COMMAND` прописан до запуска этих инструментов.
+`run_agent` reads `AGENT_COMMAND` from the agent's `.env` and substitutes
+`$SIDECAR_PYTHON` → the MCP server's `sys.executable`.
+Make sure `.env` exists and `AGENT_COMMAND` is set before running these tools.
 
-Ручная проверка без MCP:
+Manual check without the MCP:
 ```bash
 echo '{"mode":"describe"}' | $SIDECAR_PYTHON agent.py
 echo '{"capability":"...", "body":{...}}' | $SIDECAR_PYTHON agent.py
@@ -16,28 +16,28 @@ echo '{"capability":"...", "body":{...}}' | $SIDECAR_PYTHON agent.py
 
 ---
 
-## TonAPI: объекты могут приходить как строки
+## TonAPI: nested objects can arrive as strings
 
-TonAPI иногда возвращает вложенные объекты (nft, collection, contract) как строку-адрес
-вместо объекта — если сущность неизвестна или не индексирована.
+TonAPI sometimes returns nested objects (nft, collection, contract) as a bare
+address string instead of an object — when the entity is unknown or not indexed.
 
-Пример из /v2/accounts/{address}/events:
+Example from /v2/accounts/{address}/events:
 
 ```json
-// Ожидаешь:
+// What you expect:
 {"nft": {"address": "EQ...", "metadata": {"name": "Cool NFT"}}}
 
-// Получаешь для неизвестных NFT:
+// What you get for unknown NFTs:
 {"nft": "EQ..."}
 ```
 
-Защита обязательна для полей: nft, collection, contract, jetton, account:
+Guard the fields nft, collection, contract, jetton, account:
 
 ```python
-# НЕПРАВИЛЬНО — упадёт с AttributeError:
+# WRONG — raises AttributeError:
 name = event["nft"]["metadata"]["name"]
 
-# ПРАВИЛЬНО:
+# RIGHT:
 nft = event.get("nft")
 name = nft.get("metadata", {}).get("name", "NFT") if isinstance(nft, dict) else "NFT"
 
@@ -45,27 +45,27 @@ col_raw = item.get("collection")
 col = (col_raw.get("name") if isinstance(col_raw, dict) else None) or "Unknown Collection"
 ```
 
-Правило: всегда делай isinstance(x, dict) перед .get() для вложенных объектов TonAPI.
+Rule: always isinstance(x, dict) before .get() on nested TonAPI objects.
 
 ---
 
-## Workdir сайдкара при `run`
+## Sidecar workdir on `run`
 
-Сайдкар ищет agent.py относительно своего CWD. Если запускаешь из другой директории:
+The sidecar looks for agent.py relative to its CWD. If you run from another directory:
 
 ```bash
-# Неправильно — ищет agent.py в текущей папке:
+# Wrong — looks for agent.py in the current folder:
 cd /root/sidecar && sidecar.py run --env-file /root/generated-agent/.env
 
-# Правильно:
+# Right:
 cd /root/generated-agent && sidecar.py run --env-file .env
 ```
 
 ---
 
-## Порт уже занят после ручного запуска
+## Port already in use after a manual run
 
-Если сайдкар падает с "Address already in use":
+If the sidecar fails with "Address already in use":
 ```bash
 lsof -i :<PORT> | grep LISTEN
 kill -9 <PID>
@@ -73,15 +73,15 @@ kill -9 <PID>
 
 ---
 
-## Параллельные запросы в агенте
+## Concurrent requests inside an agent
 
-Сайдкар может запускать несколько инстанций агента одновременно для разных клиентов.
-Не используй asyncio.gather() для внешних API с rate limits — это создаст burst.
-Делай запросы последовательно внутри одного вызова агента.
+The sidecar may run several agent instances at once for different clients.
+Don't use asyncio.gather() against external APIs with rate limits — it creates a burst.
+Make requests sequentially within a single agent call.
 """
 
 def register_gotchas(mcp: FastMCP) -> None:
     @mcp.resource("catallaxy://guide/gotchas")
     def gotchas() -> str:
-        """Известные грабли: AGENT_COMMAND/python path, TonAPI quirks, workdir, порты, concurrency."""
+        """Known gotchas: AGENT_COMMAND/python path, TonAPI quirks, workdir, ports, concurrency."""
         return CONTENT

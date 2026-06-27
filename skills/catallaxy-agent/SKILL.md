@@ -198,7 +198,7 @@ OWNER_WALLET=<ask user — don't hard-code>
 TONAPI_KEY=...
 # Optional sidecar resilience knobs (all have sensible defaults):
 # TONAPI_FALLBACK_DISABLED=1          # disable HTTP fallback entirely
-# BALANCER_REBUILD_INTERVAL_SEC=14400 # period of periodic LiteBalancer rebuild
+# BALANCER_REBUILD_INTERVAL_SEC=3600  # period of periodic LiteBalancer rebuild (default 1h)
 # BALANCER_REBUILD_DISABLED=1         # disable periodic rebuild
 ```
 
@@ -370,9 +370,9 @@ about payments, refunds, and delayed refunds from the refund worker. It is
 fully optional — skip it unless the user asks.
 
 **Always ask before adding it.** Sample question:
-> «Подключить owner-бот для уведомлений о платежах? Нужен отдельный
-> Telegram-бот (свой @BotFather-токен) для этого агента и список Telegram
-> user_id владельца(ев).»
+> "Want an owner bot for payment notifications? It needs a separate
+> Telegram bot (its own @BotFather token) for this agent and a list of the
+> owner's Telegram user_id(s)."
 
 If yes, gather two values from the user (never invent):
 - `TG_BOT_TOKEN` — token from @BotFather. **One bot per agent** — don't
@@ -500,7 +500,7 @@ After the service is up, MCP-test it:
 - `mcp__catallaxy__agent_status` / `agent_logs` — runtime checks
 - Marketplace pages:
   - `https://ctlx.cc/agent/<sidecar_id>`
-  - `https://dearjohndoe.github.io/ton-agents-marketplace/agents/<sidecar_id>` (mirror)
+  - `https://dearjohndoe.github.io/catallaxy/agents/<sidecar_id>` (mirror)
 
 ## 12. MCP catallaxy tools (cheat sheet)
 
