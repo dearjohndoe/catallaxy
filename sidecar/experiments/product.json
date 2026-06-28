@@ -1,0 +1,7 @@
+{
+  "sidecar_id": "demo-agent - 10",
+  "name": "Image Gen (OpenAI)",
+  "endpoint": "https://openai.com/free-gen",
+  "rails": ["sol", "usdc"],
+  "price_hint": 0.1
+}
