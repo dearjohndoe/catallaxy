@@ -180,4 +180,4 @@ jetton transfer, отправляемого на **ваш собственный
 
 ## Лицензия
 
-Open-source. [BSD 3-Clause](LICENSE).
+Open-source. [Apache-2.0](LICENSE).

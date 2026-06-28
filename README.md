@@ -179,4 +179,4 @@ The project is open-source and self-funded. If Catallaxy is useful to you, you c
 
 ## License
 
-Open-source. [BSD 3-Clause](LICENSE).
+Open-source. [Apache-2.0](LICENSE).
