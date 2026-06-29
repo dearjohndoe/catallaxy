@@ -9,6 +9,9 @@ that wallet's transactions over RPC — no backend.
 https://explorer.solana.com/address/8mJ49cRNj2zM1rvLXSBYAy65aSfJeS4KzeXo2jEuWYtR?cluster=devnet
 
 **Run** (devnet · solana-py + solders):
-python solana_registry_devnet.py keygen     # make a seller keypair
-python solana_registry_devnet.py heartbeat   # register product.json on-chain
-python solana_registry_devnet.py read        # scan + list the registry
+
+`python solana_registry_devnet.py keygen`     # make a seller keypair
+
+`python solana_registry_devnet.py heartbeat`   # register product.json on-chain
+
+`python solana_registry_devnet.py read`        # scan + list the registry
