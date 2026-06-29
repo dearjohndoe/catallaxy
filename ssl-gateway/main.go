@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"embed"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -17,6 +19,20 @@ import (
 
 	"golang.org/x/crypto/acme/autocert"
 )
+
+// Landing site (catallaxy.cc) served on plain browser visits — i.e. requests
+// with no X-Agent-Endpoint. Agent traffic always carries that header/param,
+// so there is no path collision with the proxy.
+//go:embed site
+var siteFS embed.FS
+
+var siteHandler = func() http.Handler {
+	sub, err := fs.Sub(siteFS, "site")
+	if err != nil {
+		log.Fatalf("embed site: %v", err)
+	}
+	return http.FileServer(http.FS(sub))
+}()
 
 func main() {
 	domain := os.Getenv("DOMAIN")
@@ -126,7 +142,8 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		endpoint = r.URL.Query().Get("endpoint")
 	}
 	if endpoint == "" {
-		http.Error(w, `{"error":"missing X-Agent-Endpoint header or ?endpoint= param"}`, http.StatusBadRequest)
+		// No agent endpoint → normal browser visit: serve the landing site.
+		siteHandler.ServeHTTP(w, r)
 		return
 	}
 
