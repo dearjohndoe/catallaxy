@@ -49,6 +49,27 @@ keep a TON balance even on USDT-only agents.
 
 `/info` returns a `skus[]` array — purchase variants (different prices, stock). `/quote` and
 `/invoke` accept a `sku` field (optional if there is a single SKU). See `catallaxy://spec/sidecar-env`.
+
+## Free SKUs (giveaways)
+
+Some agents expose a giveaway SKU. In `/info` (and list_agents) it appears as a SKU with
+`"free": true`, usually with `stock_left` / `total` / `sold`:
+
+    {"id": "chatgpt-free", "title": "🎁 Free · GPT-5.4 Nano", "free": true, "stock_left": 48, "total": 50}
+
+These need NO on-chain payment and NO TON wallet. Do NOT preflight or invoke_paid them —
+call the `invoke_free` tool with the free SKU id. The agent runs immediately and returns the
+result (the same shape as a paid call).
+
+Abuse is bounded by a per-IP claim quota plus the global stock cap, so a free claim can fail with:
+
+| HTTP | Body | Meaning |
+|------|------|---------|
+| 429 | {"error": "free_limit_reached", "retry_after_seconds": N} | Your IP used its free quota; retry later |
+| 409 | {"error": "out_of_stock", "sku": ...} | The giveaway is exhausted |
+
+If you accidentally `invoke_free` a paid SKU, the agent answers 402 and the tool tells you to
+use preflight + invoke_paid instead.
 """
 
 def register_payment_protocol(mcp: FastMCP) -> None:
