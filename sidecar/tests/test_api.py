@@ -648,7 +648,10 @@ async def test_invoke_happy_path_runs_agent_and_returns_done(client, monkeypatch
         amount=5_000_000, comment="n:sid-test",
     ))
 
+    seen_env = {}
+
     async def fake_run(**kwargs):
+        seen_env.update(kwargs.get("env") or {})
         return {"result": {"type": "text", "data": "translated"}}
 
     monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
@@ -668,6 +671,8 @@ async def test_invoke_happy_path_runs_agent_and_returns_done(client, monkeypatch
     assert data["result"] == {"type": "text", "data": "translated"}
     # The mark was against the real on-chain hash, not the user-supplied one.
     app.tx_store.mark_processed.assert_awaited_once_with("ton:real-hash")
+    assert seen_env.get("CALLER_AMOUNT_NANO") == "5000000"
+    assert seen_env.get("PAYMENT_RAIL") == "TON"
 
 
 async def test_invoke_agent_runtime_error_triggers_refund(client, monkeypatch):
@@ -1334,6 +1339,7 @@ async def test_free_invoke_runs_without_payment(app_factory, tmp_path, monkeypat
     assert seen_env.get("FREE") == "1"
     assert seen_env.get("PAYMENT_RAIL") == "FREE"
     assert seen_env.get("CALLER_TX_HASH") == ""
+    assert seen_env.get("CALLER_AMOUNT_NANO") == "0"
 
 
 async def test_free_invoke_second_call_same_ip_limited(app_factory, tmp_path, monkeypatch):

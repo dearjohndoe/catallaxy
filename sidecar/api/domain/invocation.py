@@ -68,6 +68,7 @@ def create_runner(
                     "CALLER_ADDRESS": sender,
                     "CALLER_TX_HASH": tx_hash,
                     "PAYMENT_RAIL": rail,
+                    "CALLER_AMOUNT_NANO": str(amount),
                     "FREE": "1" if free else "0",
                 },
             )
