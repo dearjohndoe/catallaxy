@@ -13,6 +13,7 @@ Run this file in isolation to see every pending issue at a glance:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import time
@@ -28,8 +29,29 @@ import api as api_module
 import chains.ton.transfer as transfer_module
 from api import SidecarApp
 from settings import AgentSku, DEFAULT_SKU_ID, Settings
+from chains.ton.jetton import USDT_MASTER_TESTNET, USDT_MASTER_MAINNET
 from chains.ton.transfer import TransferSender
 from payments import PaymentVerificationError, ProcessedTxStore, VerifiedPayment
+
+# Well-formed split-nonce claim value for tests that POST /invoke with a
+# tx+nonce directly (skipping the real 402 round trip). Split-nonce claim
+# auth (TODO-claim-auth.md) requires exactly 16 hex chars before the
+# ":sidecar_id" suffix — pub(8) + sec(8).
+VALID_PUB = "11111111"
+VALID_SEC = "22222222"
+VALID_NONCE = f"{VALID_PUB}{VALID_SEC}:sid-test"
+
+
+async def _seed_claim_secret(
+    app: SidecarApp, pub: str = VALID_PUB, sec: str = VALID_SEC, ttl: int = 3600,
+) -> None:
+    """Register a claim secret the way ``build_402_response`` would at mint
+    time. Needed by any test that posts a ``tx``+``nonce`` claim directly —
+    otherwise the new claim-secret check (TODO-claim-auth.md) 403s before
+    ever reaching a mocked verifier."""
+    await app.claim_secrets.insert(
+        pub, hashlib.sha256(sec.encode()).hexdigest(), int(time.time()) + ttl,
+    )
 
 
 # ── Shared settings/app builders (subset of test_api.py) ───────────────
@@ -88,6 +110,8 @@ def _make_settings(tmp_path: Path, **overrides) -> Settings:
         payment_rails=tuple(rails),
         tg_bot_token=None,
         tg_user_ids=(),
+        usdt_master=USDT_MASTER_TESTNET,
+        jetton_wallet_code_hex=None,
     )
     base.update(overrides)
     return Settings(**base)
@@ -118,6 +142,10 @@ async def bug_client(tmp_path):
             pass
         try:
             await app.stock.close()
+        except Exception:
+            pass
+        try:
+            await app.claim_secrets.close()
         except Exception:
             pass
 
@@ -246,13 +274,14 @@ async def test_uploaded_file_cleaned_on_payment_verification_error(bug_client):
     app: SidecarApp = bug_client.sidecar
     app.tx_store.is_processed = AsyncMock(return_value=False)
     app.verifier.verify = AsyncMock(side_effect=PaymentVerificationError("bad"))
+    await _seed_claim_secret(app)
 
     assert _count_uploaded_files(app) == 0
 
     form = FormData()
     form.add_field("capability", "translate")
     form.add_field("tx", "user-tx")
-    form.add_field("nonce", "n:sid-test")
+    form.add_field("nonce", VALID_NONCE)
     form.add_field("body_json", json.dumps({"text": "hi"}))
     form.add_field("file:image", io.BytesIO(b"LEAK-ME-3"),
                    filename="leak3.png", content_type="image/png")
@@ -510,12 +539,13 @@ async def test_usdt_payment_rejected_when_price_unavailable(tmp_path, monkeypatc
     web_app.on_shutdown.append(lambda _: fake_shutdown())
 
     app.tx_store.is_processed = AsyncMock(return_value=False)
+    await _seed_claim_secret(app)
 
     async with TestClient(TestServer(web_app)) as c:
         resp = await c.post("/invoke", json={
             "capability": "translate",
             "tx": "some-usdt-tx",
-            "nonce": "abc:sid-test",
+            "nonce": VALID_NONCE,
             "rail": "USDT",
             "body": {"text": "hello"},
         })
@@ -588,12 +618,13 @@ async def test_ton_payment_rejected_when_price_unavailable(tmp_path, monkeypatch
     web_app.on_shutdown.append(lambda _: fake_shutdown())
 
     app.tx_store.is_processed = AsyncMock(return_value=False)
+    await _seed_claim_secret(app)
 
     async with TestClient(TestServer(web_app)) as c:
         resp = await c.post("/invoke", json={
             "capability": "translate",
             "tx": "some-ton-tx",
-            "nonce": "abc:sid-test",
+            "nonce": VALID_NONCE,
             "rail": "TON",
             "body": {"text": "hello"},
         })
@@ -670,12 +701,13 @@ async def test_refund_queue_enqueues_usdt_when_verifier_unavailable(tmp_path, mo
     web_app.on_shutdown.append(lambda _: fake_shutdown())
 
     app.tx_store.is_processed = AsyncMock(return_value=False)
+    await _seed_claim_secret(app)
 
     async with TestClient(TestServer(web_app)) as c:
         resp = await c.post("/invoke", json={
             "capability": "translate",
             "tx": "lost-usdt-tx",
-            "nonce": "abc:sid-test",
+            "nonce": VALID_NONCE,
             "rail": "USDT",
             "body": {"text": "hello"},
         })
@@ -832,6 +864,7 @@ async def _build_post_verify_app(tmp_path, monkeypatch):
         amount=1_000_000, comment="n:sid-test",
     ))
     app.tx_store.is_processed = AsyncMock(return_value=False)
+    await _seed_claim_secret(app)
 
     async def fake_startup():
         app._file_store_dir.mkdir(parents=True, exist_ok=True)
@@ -842,6 +875,7 @@ async def _build_post_verify_app(tmp_path, monkeypatch):
         await app.refund_queue.close()
         await app.tx_store.close()
         await app.stock.close()
+        await app.claim_secrets.close()
 
     app.startup = fake_startup  # type: ignore[method-assign]
     app.shutdown = fake_shutdown  # type: ignore[method-assign]
@@ -865,7 +899,7 @@ async def test_mark_processed_failure_after_verify_enqueues_refund(tmp_path, mon
         )
         resp = await c.post("/invoke", json={
             "capability": "translate", "tx": "real-hash",
-            "nonce": "n:sid-test", "body": {"text": "hi"},
+            "nonce": VALID_NONCE, "body": {"text": "hi"},
         })
         assert resp.status == 503
         data = await resp.json()
@@ -893,7 +927,7 @@ async def test_mark_processed_integrity_error_returns_409_no_refund(tmp_path, mo
         )
         resp = await c.post("/invoke", json={
             "capability": "translate", "tx": "real-hash",
-            "nonce": "n:sid-test", "body": {"text": "hi"},
+            "nonce": VALID_NONCE, "body": {"text": "hi"},
         })
         assert resp.status == 409
         data = await resp.json()
@@ -915,7 +949,7 @@ async def test_jobs_submit_failure_enqueues_refund_with_force(tmp_path, monkeypa
         app.jobs.submit = AsyncMock(side_effect=RuntimeError("job system down"))
         resp = await c.post("/invoke", json={
             "capability": "translate", "tx": "real-hash",
-            "nonce": "n:sid-test", "body": {"text": "hi"},
+            "nonce": VALID_NONCE, "body": {"text": "hi"},
         })
         assert resp.status == 503
         data = await resp.json()

@@ -58,6 +58,7 @@ async def startup(app: "SidecarApp") -> None:
             avatar_url=app.settings.agent_avatar_url,
             images=app.settings.agent_images,
             owner_wallet=app.settings.owner_wallet,
+            rails=app.settings.payment_rails,
         ),
         state_store=app.state_store,
         transfer_sender=app.sender.send,
@@ -92,6 +93,11 @@ async def startup(app: "SidecarApp") -> None:
         await app.free_claims.init()
     except Exception:
         logger.exception("FreeClaimStore.init failed")
+
+    try:
+        await app.claim_secrets.init()
+    except Exception:
+        logger.exception("ClaimSecretStore.init failed")
 
     if app.settings.tg_bot_token and app.settings.tg_user_ids:
         app.owner_bot = OwnerBot(
@@ -141,5 +147,6 @@ async def shutdown(app: "SidecarApp") -> None:
     await app.stock.close()
     await app.refund_queue.close()
     await app.free_claims.close()
+    await app.claim_secrets.close()
     if app.owner_bot is not None:
         await app.owner_bot.close()

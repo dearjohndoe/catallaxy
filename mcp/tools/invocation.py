@@ -51,7 +51,14 @@ def register_invocation_tools(mcp: FastMCP) -> None:
         pay_url_tonkeeper) and a scannable ASCII QR (pay_qr) — these carry the payload
         as `bin=`, the only correct way to pay by hand. The `how_to_pay` field tells you
         whether to pay from your own wallet (if a TON MCP is connected) or hand off to
-        the user. Never send the nonce as a plain text comment — it won't be matched.
+        the user. Never send `memo` or `nonce` as a plain text comment — it won't be
+        matched.
+
+        The returned `nonce` is the full claim value — keep it and pass it to
+        invoke_paid unchanged. It is NOT the same string as `memo`/the on-chain
+        payload: `memo` (shorter, public) is what actually gets embedded in the
+        payment cell/deeplink above; `nonce` (longer, includes a secret half) only
+        ever travels in this response and in the claim POST — never put it on-chain.
         """
         payload: dict = {"capability": capability, "body": body, "rail": rail}
         if quote_id:
@@ -97,10 +104,15 @@ def register_invocation_tools(mcp: FastMCP) -> None:
             available = [o.get("rail") for o in payment_options]
             raise ValueError(f"Rail '{rail}' not available. Agent supports: {available}")
 
-        nonce = opt.get("memo", "")
+        # `memo` is the public-only half — it goes on-chain (payment cell/deeplink)
+        # and is what a chain watcher can see. `nonce` is the new, separate field
+        # carrying the full pub+sec value; it must be kept aside and presented only
+        # at claim time (invoke_paid), never embedded in the on-chain payload.
+        memo = opt.get("memo", "")
+        claim_nonce = opt.get("nonce", "")
         result: dict = {
             "rail": rail,
-            "nonce": nonce,
+            "nonce": claim_nonce,
             "payment_options": payment_options,
         }
 
@@ -112,7 +124,7 @@ def register_invocation_tools(mcp: FastMCP) -> None:
             payload_b64, payload_hex = build_jetton_transfer_cell(
                 agent_address=agent_address,
                 usdt_amount=usdt_amount,
-                nonce=nonce,
+                nonce=memo,
                 response_destination=user_address,
             )
             result.update({
@@ -129,20 +141,22 @@ def register_invocation_tools(mcp: FastMCP) -> None:
                     "If you have a TON wallet available (e.g. a connected TON MCP), "
                     "offer the user a choice: pay it yourself (send the jetton transfer "
                     "with payload_base64 + attached_ton gas to your own USDT jetton "
-                    "wallet, then call invoke_paid with rail='USDT' and the tx_hash), "
-                    "or let the user pay. If you have no wallet, hand the payload + "
-                    "instructions to the user."
+                    "wallet, then call invoke_paid with rail='USDT', the tx_hash, and "
+                    "this response's `nonce` field), or let the user pay. If you have "
+                    "no wallet, hand the payload + instructions to the user."
                 ),
             })
         else:
             address = opt.get("address", "")
             amount = str(opt.get("amount", "0"))
-            payload_b64, payload_hex = build_payment_cell(nonce)
+            payload_b64, payload_hex = build_payment_cell(memo)
             # Ready-to-sign deeplinks. MUST carry the payload as `bin=` (raw BoC),
             # NOT `text=` — a plain text comment uses opcode 0x00000000, but the
             # agent's payment monitor only indexes transactions whose comment cell
             # starts with PAYMENT_OPCODE (0x50415900). A `text=` deeplink silently
-            # fails verification with "Transaction not found".
+            # fails verification with "Transaction not found". The payload embeds
+            # `memo` (public-only half) — the on-chain payload must never carry
+            # the full claim `nonce`/secret.
             bin_q = quote(payload_b64, safe="")
             pay_url = f"ton://transfer/{address}?amount={amount}&bin={bin_q}"
             pay_url_tonkeeper = (
@@ -159,16 +173,20 @@ def register_invocation_tools(mcp: FastMCP) -> None:
                 "pay_qr": _ascii_qr(pay_url),
                 "warning": (
                     "To pay by hand, use pay_url/pay_url_tonkeeper or send the "
-                    "payload_base64 as the message body (bin). Do NOT send the nonce "
-                    "as a plain text comment — it will not be matched."
+                    "payload_base64 as the message body (bin). Do NOT send `memo` "
+                    "(or `nonce`) as a plain text comment — it will not be matched. "
+                    "The on-chain payload only ever carries `memo` (the public-only "
+                    "half); the full `nonce` from this response is for invoke_paid "
+                    "only and must never be sent on-chain."
                 ),
                 "how_to_pay": (
                     "If you have a TON wallet available (e.g. a connected TON MCP), "
                     "check your balance and offer the user a choice: pay it yourself "
                     f"({result['rail']}: send {amount} nanoton with payload_base64 as "
                     "the message body to `address`, then call invoke_paid with the "
-                    "resulting tx_hash), or let the user pay by showing them pay_qr / "
-                    "pay_url. If you have no wallet, show pay_qr / pay_url to the user."
+                    "tx_hash AND this response's `nonce` field), or let the user pay "
+                    "by showing them pay_qr / pay_url. If you have no wallet, show "
+                    "pay_qr / pay_url to the user."
                 ),
             })
 
@@ -189,10 +207,17 @@ def register_invocation_tools(mcp: FastMCP) -> None:
     ) -> dict:
         """Call agent with proof of payment (TX hash from @ton/mcp).
 
+        Sends both `proof` (v2) and `tx` (CTLX/1 alias) so either sidecar version works.
         rail: "TON" (default) or "USDT" — must match the rail used in preflight.
+        nonce: the full claim value from preflight's `nonce` field (NOT `memo` —
+            `memo` is only the public half embedded in the on-chain payload; this
+            claim step needs the longer `nonce` value, which never went on-chain).
         sku: optional SKU id — must match the one used in preflight/quote.
         """
-        payload: dict = {"tx": tx_hash, "nonce": nonce, "capability": capability, "body": body, "rail": rail}
+        payload: dict = {
+            "proof": tx_hash, "tx": tx_hash,
+            "nonce": nonce, "capability": capability, "body": body, "rail": rail,
+        }
         if quote_id:
             payload["quote_id"] = quote_id
         if sku:

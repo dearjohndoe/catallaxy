@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
-import uuid
+import time
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
 from chains.base import ChainRail, chain_for_rail, namespaced_tx_key
-from payments import PaymentVerificationError
+from payments import PaymentVerificationError, mint_nonce
 from settings import AgentSku
 
 from api.http.responses import render_done_response
@@ -18,6 +19,13 @@ if TYPE_CHECKING:
     from api.app import SidecarApp
 
 logger = logging.getLogger("sidecar")
+
+# Housekeeping TTL for claim_secrets rows — deliberately independent of
+# payment_timeout (see build_402_response). Generous enough that a slow
+# payer never spuriously loses their claim secret; the sidecar's own
+# payment-freshness check (ton_verifier, anchored to on-chain tx time) is
+# what actually bounds how long a payment session can be.
+CLAIM_SECRET_TTL_SECONDS = 3600
 
 
 def unlock_quote(quote_id: str | None, sidecar: "SidecarApp") -> None:
@@ -122,30 +130,59 @@ async def build_402_response(
             headers={"Retry-After": "60"},
         )
 
-    nonce = parsed.nonce
-    if not nonce or not nonce.endswith(f":{sidecar.sidecar_id}"):
-        nonce = f"{uuid.uuid4().hex[:16]}:{sidecar.sidecar_id}"
-
-    payment_options: list[dict[str, Any]] = []
-    for rail, amount in priced:
-        opt = rail.payment_option(amount, nonce)
-        opt["sku"] = sku.sku_id  # not rail-specific; added by the caller
-        payment_options.append(opt)
-
     # This happens when an SKU uses dynamic pricing and the agent omitted it from
     # `mode=prices` — typically because it's out of stock upstream. Emitting a
     # 402 with empty payment_options makes price-less clients build a payment
     # from undefined address/amount and crash; report out_of_stock instead.
-    if not payment_options:
+    # Checked before minting a claim secret below so we don't write a row that
+    # will never back a usable 402.
+    if not priced:
         logger.info(
             "preflight: no purchasable price for sku=%s (dynamic price unresolved) "
             "— reporting out_of_stock", sku.sku_id,
         )
         return web.json_response({"error": "out_of_stock", "sku": sku.sku_id}, status=409)
 
+    # Split-nonce claim auth (TODO-claim-auth.md, PROTOCOL.md §5/§6.1): mint a
+    # fresh pub(8 hex)+sec(8 hex) pair, persist a hash of `sec` keyed by `pub`,
+    # and advertise only the public half (`pub_nonce`) on-chain via `memo` /
+    # the payment cell. `full_nonce` (containing `sec`) is exposed solely in
+    # the JSON body's `payment_options[].nonce` field — never in the
+    # `x-ton-pay-nonce` header, never in `memo`.
+    #
+    # TTL is deliberately NOT derived from `payment_timeout`: that setting
+    # gates payment *freshness* on a different clock (verify_payment checks
+    # `now - tx.now`, anchored to when the on-chain payment confirmed).
+    # Anchoring this TTL to mint time instead would falsely reject a buyer
+    # who simply took a while to broadcast payment after seeing the 402
+    # (wallet app, cross-device QR, etc.) even though their payment is still
+    # fresh. This TTL only needs to outlive a realistic "time to pay" window
+    # — it's housekeeping so `claim_secrets` doesn't grow unbounded, not a
+    # session-length control.
+    pub, sec, pub_nonce, full_nonce = mint_nonce(sidecar.sidecar_id)
+    try:
+        await sidecar.claim_secrets.insert(
+            pub, hashlib.sha256(sec.encode()).hexdigest(),
+            int(time.time()) + CLAIM_SECRET_TTL_SECONDS,
+        )
+    except Exception:
+        logger.exception("claim_secrets.insert failed — claim will 403 later, refusing 402")
+        return web.json_response(
+            {"error": "service temporarily unavailable", "retry_after_seconds": 30},
+            status=503,
+            headers={"Retry-After": "30"},
+        )
+
+    payment_options: list[dict[str, Any]] = []
+    for rail, amount in priced:
+        opt = rail.payment_option(amount, pub_nonce)
+        opt["sku"] = sku.sku_id  # not rail-specific; added by the caller
+        opt["nonce"] = full_nonce  # full claim value; JSON body only, never on-chain
+        payment_options.append(opt)
+
     resp_body: dict[str, Any] = {
         "error": "Payment required",
-        "payment_request": payment_options[0] if payment_options else {},
+        "payment_request": payment_options[0],
         "payment_options": payment_options,
     }
 
@@ -153,7 +190,10 @@ async def build_402_response(
     if eff_ton:
         headers["x-ton-pay-address"] = sidecar.settings.agent_wallet
         headers["x-ton-pay-amount"] = str(min_ton)
-        headers["x-ton-pay-nonce"] = nonce
+        # Public-only half, matching `memo` — NOT the full claim nonce. A
+        # header-only client has no way to claim under the split-nonce
+        # scheme (it never sees `sec`); see PROTOCOL.md §5.
+        headers["x-ton-pay-nonce"] = pub_nonce
 
     return web.json_response(resp_body, status=402, headers=headers)
 

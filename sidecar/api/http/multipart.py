@@ -14,9 +14,13 @@ async def parse_multipart_invoke(
     """Parse multipart/form-data invoke request.
 
     Returns: (tx_hash, nonce, capability, quote_id, rail, sku, body_dict, uploaded_files)
+
+    ``proof`` is the v2 field name; ``tx`` is the CTLX/1 alias. When both
+    are present ``proof`` wins.
     """
     reader = await request.multipart()
     tx_hash = nonce = capability = ""
+    proof = ""
     quote_id: str | None = None
     rail = "TON"
     sku: str | None = None
@@ -25,7 +29,9 @@ async def parse_multipart_invoke(
 
     async for part in reader:
         name = part.name
-        if name == "tx":
+        if name == "proof":
+            proof = (await part.text()).strip()
+        elif name == "tx":
             tx_hash = (await part.text()).strip()
         elif name == "nonce":
             nonce = (await part.text()).strip()
@@ -49,4 +55,4 @@ async def parse_multipart_invoke(
             file_path.write_bytes(file_data)
             uploaded_files[field_name] = file_path
 
-    return tx_hash, nonce, capability, quote_id, rail, sku, body, uploaded_files
+    return proof or tx_hash, nonce, capability, quote_id, rail, sku, body, uploaded_files

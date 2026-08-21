@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 from aiohttp import web
 
-from payments import parse_nonce
+from payments import parse_nonce, split_full_nonce
 from settings import AgentSku, SkuKind
 from chains.base import chain_for_rail, namespaced_tx_key
 
@@ -62,8 +65,10 @@ async def _parse_invoke_request(
                 body=body, payload={"body": body}, uploaded_files=uploaded_files,
             )
         data = await request.json()
+        # v2 canonical field is ``proof``; ``tx`` is the CTLX/1 alias.
+        proof = str(data.get("proof") or data.get("tx") or "").strip()
         return ParsedInvoke(
-            tx_hash=str(data.get("tx", "")).strip(),
+            tx_hash=proof,
             nonce=str(data.get("nonce", "")).strip(),
             capability=str(data.get("capability", "")).strip(),
             quote_id=str(data.get("quote_id", "")).strip() or None,
@@ -362,6 +367,39 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
                 )
             # 'processed' falls through — should not happen unless racy
 
+        # Split-nonce claim-secret check (TODO-claim-auth.md, PROTOCOL.md
+        # §6.1) — front-running fix. `{tx, pub}` alone is everything a chain
+        # watcher can observe on-chain; `sec` never appears there, only in
+        # the 402 response body delivered to whoever requested it. Runs
+        # after the is_processed/refund-pending checks above (so legitimate
+        # retries on an already-settled tx still get those clearer errors)
+        # and before verify_payment (so a wrong guess never reaches chain
+        # RPC). Rejection here MUST NOT mark the tx processed, consume the
+        # nonce, or enqueue a refund — a subsequent claim with the correct
+        # secret must still succeed (real payer isn't blocked by an
+        # attacker's failed guess).
+        split = split_full_nonce(parsed.nonce)
+        if split is None:
+            unlock_quote(parsed.quote_id, sidecar)
+            return web.json_response({"error": "invalid or expired claim"}, status=403)
+        pub, pub_nonce, sec = split
+        claim_row = await sidecar.claim_secrets.check(pub)
+        if (
+            claim_row is None
+            or claim_row[1] <= int(time.time())
+            or claim_row[0] != hashlib.sha256(sec.encode()).hexdigest()
+        ):
+            unlock_quote(parsed.quote_id, sidecar)
+            return web.json_response({"error": "invalid or expired claim"}, status=403)
+
+        # The secret has done its job at the gate above; nothing downstream
+        # (chain lookup, refund bookkeeping, the job runner) needs `sec`
+        # again, and it must not keep propagating in plaintext (e.g.
+        # refund_queue.pending_refunds.nonce, job runner logs). Rebind
+        # `parsed` to the public-only nonce for the rest of this function —
+        # `verify_payment` also needs `pub_nonce` here since it looks the tx
+        # up on-chain keyed by the value actually embedded in the memo/cell.
+        parsed = dataclasses.replace(parsed, nonce=pub_nonce)
         verified = await verify_payment(parsed, sku, sidecar, min_ton, min_usdt)
         if isinstance(verified, web.Response):
             return verified
@@ -402,6 +440,14 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
                 sender=verified.sender, amount=verified.amount,
                 reason="mark_processed_failed",
             )
+
+        # Post-success hygiene only, not a security gate: mark_processed's
+        # PRIMARY KEY already made this claim single-use. Best-effort so a
+        # store hiccup here never affects the response being built.
+        try:
+            await sidecar.claim_secrets.delete(pub)
+        except Exception:
+            logger.exception("claim_secrets.delete failed (best-effort) pub=%s", pub)
 
         reservation_key, created_reservation_keys, stock_err = await claim_stock(parsed, sku, sidecar, verified)
         if stock_err is not None:

@@ -14,7 +14,7 @@ async function sendUsdt(pr: PaymentRequest, options: PaymentOption[], tc: TonCon
   const master = options.find(o => o.rail === 'USDT')?.token?.master ?? ''
   if (!master) throw new Error('USDT master address not available')
   const userJettonWallet = await resolveJettonWallet(TONCENTER_BASE, master, userAddr)
-  const payload = buildJettonTransferPayload(pr.address, BigInt(pr.amount), pr.nonce, userAddr)
+  const payload = buildJettonTransferPayload(pr.address, BigInt(pr.amount), pr.memo, userAddr)
   const res = await tc.sendTransaction({
     validUntil: Math.floor(Date.now() / 1000) + 300,
     messages: [{ address: userJettonWallet, amount: toNano('0.1').toString(), payload }],
@@ -26,7 +26,7 @@ async function sendTon(pr: PaymentRequest, tc: TonConnect): Promise<string> {
   const recipient = Address.parse(pr.address).toString({ bounceable: false, urlSafe: true, testOnly: TESTNET })
   const res = await tc.sendTransaction({
     validUntil: Math.floor(Date.now() / 1000) + 300,
-    messages: [{ address: recipient, amount: pr.amount, payload: buildPaymentPayload(pr.nonce) }],
+    messages: [{ address: recipient, amount: pr.amount, payload: buildPaymentPayload(pr.memo) }],
   })
   return bocToMsgHash(res.boc)
 }
@@ -53,7 +53,13 @@ export async function runPayment(args: {
       throw new Error(`Rail "${rail}" not offered by agent for this SKU. Available: ${available || 'none'}`)
     }
     rail = chosen.rail
-    paymentRequest = { address: chosen.address, amount: chosen.amount, nonce: chosen.memo, rail: chosen.rail }
+    paymentRequest = {
+      address: chosen.address,
+      amount: chosen.amount,
+      nonce: chosen.nonce || chosen.memo, // claim value; fall back for old sidecars
+      memo: chosen.memo,
+      rail: chosen.rail,
+    }
   } catch (err: any) {
     const data = err?.response?.data
     if (err?.response?.status === 409 && data?.error === 'out_of_stock') {

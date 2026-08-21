@@ -12,8 +12,7 @@ from chains.ton.heartbeat import HeartbeatManager
 from jobs import JobStore
 from storage import StateStore
 from chains.ton.transfer import TransferSender
-from payments import PaymentVerifier, JettonPaymentVerifier, ProcessedTxStore, RefundQueue, TonAPIClient, FreeClaimStore
-from chains.ton.jetton import USDT_MASTER_MAINNET, USDT_MASTER_TESTNET
+from payments import PaymentVerifier, JettonPaymentVerifier, ProcessedTxStore, RefundQueue, TonAPIClient, FreeClaimStore, ClaimSecretStore
 from chains.base import ChainRail
 from chains.ton.rail_ton import TonRail
 from chains.ton.rail_usdt import UsdtRail
@@ -76,14 +75,14 @@ class SidecarApp:
         self._agent_jetton_wallet: str | None = None
         self._jetton_init_lock = asyncio.Lock()
         if any(s.price_usd is not None for s in settings.skus):
-            usdt_master = USDT_MASTER_TESTNET if settings.testnet else USDT_MASTER_MAINNET
             self.jetton_verifier = JettonPaymentVerifier(
                 agent_wallet=settings.agent_wallet,
-                usdt_master=usdt_master,
+                usdt_master=settings.usdt_master,
                 min_amount=0,  # per-call min comes from SKU; constructor default unused
                 payment_timeout_seconds=settings.payment_timeout,
                 testnet=settings.testnet,
                 tonapi_client=self.tonapi_client,
+                jetton_wallet_code_hex=settings.jetton_wallet_code_hex,
             )
         # Refund queue lives in the same SQLite file as ProcessedTxStore — they
         # already share per-agent scoping via tx_db_path and SQLite handles the
@@ -91,6 +90,9 @@ class SidecarApp:
         self.refund_queue = RefundQueue(settings.tx_db_path)
         # Per-IP FREE SKU usage accounting — same per-agent SQLite file.
         self.free_claims = FreeClaimStore(settings.tx_db_path)
+        # Split-nonce claim secrets (front-running fix, see TODO-claim-auth.md)
+        # — same per-agent SQLite file.
+        self.claim_secrets = ClaimSecretStore(settings.tx_db_path)
         self.stop_event = asyncio.Event()
         self.sidecar_id: str = ""
         # Dynamic pricing cache (populated via agent mode=prices when SKU price==0)
@@ -110,7 +112,6 @@ class SidecarApp:
         # Payment rails, keyed by rail id. Late-bound state (verifier instance,
         # agent jetton wallet, sidecar_id) is read through callables since it's
         # created/loaded after __init__.
-        usdt_master = USDT_MASTER_TESTNET if settings.testnet else USDT_MASTER_MAINNET
         self.rails: dict[str, ChainRail] = {
             "TON": TonRail(
                 get_verifier=lambda: self.verifier,
@@ -124,7 +125,7 @@ class SidecarApp:
                 get_agent_jetton_wallet=lambda: self._agent_jetton_wallet,
                 sender=self.sender,
                 agent_wallet=settings.agent_wallet,
-                usdt_master=usdt_master,
+                usdt_master=settings.usdt_master,
                 get_sidecar_id=lambda: self.sidecar_id,
             ),
         }
@@ -156,14 +157,14 @@ class SidecarApp:
             if self._agent_jetton_wallet and self.jetton_verifier is not None:
                 return True
             if self.jetton_verifier is None:
-                usdt_master = USDT_MASTER_TESTNET if self.settings.testnet else USDT_MASTER_MAINNET
                 self.jetton_verifier = JettonPaymentVerifier(
                     agent_wallet=self.settings.agent_wallet,
-                    usdt_master=usdt_master,
+                    usdt_master=self.settings.usdt_master,
                     min_amount=0,  # per-call min comes from SKU; constructor default unused
                     payment_timeout_seconds=self.settings.payment_timeout,
                     testnet=self.settings.testnet,
                     tonapi_client=self.tonapi_client,
+                    jetton_wallet_code_hex=self.settings.jetton_wallet_code_hex,
                 )
             try:
                 await self.jetton_verifier.start()

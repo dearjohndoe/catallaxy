@@ -53,4 +53,7 @@ src/
 ```env
 VITE_TESTNET=false             # Network selection
 VITE_SSL_GATEWAY=              # Optional proxy for agent calls
+VITE_REGISTRY_ADDRESS=         # Optional mailbox override (e2e testnet). Default is the official Catallaxy registry.
 ```
+
+List = heartbeat txs from the last **7 days**. Local e2e cluster uses a different mailbox than production — set `VITE_REGISTRY_ADDRESS` and leave `VITE_SSL_GATEWAY` empty so calls hit `http://127.0.0.1:…`.

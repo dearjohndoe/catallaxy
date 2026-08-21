@@ -125,6 +125,25 @@ def test_load_settings_blank_capability_raises(clean_env, monkeypatch):
         load_settings(env_file="/nonexistent/.env")
 
 
+def test_usdt_master_defaults_mainnet(clean_env, monkeypatch):
+    _apply_required(monkeypatch)
+    monkeypatch.delenv("TESTNET", raising=False)
+    s = load_settings(env_file="/nonexistent/.env")
+    from chains.ton.jetton import USDT_MASTER_MAINNET
+    assert s.usdt_master == USDT_MASTER_MAINNET
+    assert s.jetton_wallet_code_hex is None
+
+
+def test_usdt_master_override_does_not_use_tether_code(clean_env, monkeypatch):
+    _apply_required(monkeypatch)
+    monkeypatch.setenv("TESTNET", "true")
+    monkeypatch.setenv("USDT_MASTER", "EQ-custom-master")
+    monkeypatch.setenv("JETTON_WALLET_CODE", "b5ee9c72dead")
+    s = load_settings(env_file="/nonexistent/.env")
+    assert s.usdt_master == "EQ-custom-master"
+    assert s.jetton_wallet_code_hex == "b5ee9c72dead"
+
+
 def test_load_settings_defaults(clean_env, monkeypatch):
     _apply_required(monkeypatch)
     s = load_settings(env_file="/nonexistent/.env")
@@ -138,7 +157,7 @@ def test_load_settings_defaults(clean_env, monkeypatch):
     assert s.enforce_comment_nonce is True
     assert s.refund_fee_nanoton == 500000
     assert s.has_quote is False
-    assert s.rate_limit_requests == 60
+    assert s.rate_limit_requests == 120
     assert s.rate_limit_window == 60
     assert s.file_store_dir == "file_store"
     assert s.file_store_ttl == 900

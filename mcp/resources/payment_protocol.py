@@ -6,16 +6,28 @@ CONTENT = """# HTTP 402 Payment Protocol
 
 1. Client POST /invoke {capability, body} (no tx)
 2. Sidecar → 402:
-   {"error": "Payment required", "payment_request": {"address": "UQ...", "amount": "10000000", "memo": "uuid:sidecar_id"}}
-   Headers: x-ton-pay-address, x-ton-pay-amount, x-ton-pay-nonce
+   {"error": "Payment required", "payment_options": [
+     {"rail": "TON", "address": "UQ...", "amount": "10000000",
+      "memo": "pub8hex:sidecar_id", "nonce": "pub8hex+sec8hex:sidecar_id"}
+   ]}
+   Headers: x-ton-pay-address, x-ton-pay-amount, x-ton-pay-nonce (mirrors `memo`, not `nonce`)
+
+   `memo` and `nonce` are DIFFERENT values, not aliases:
+   - `memo` — public-only half. This is what goes on-chain.
+   - `nonce` — the full claim value (public half + a secret half that never goes
+     on-chain). Only appears here, in the JSON body. Required to claim in step 4.
 
 3. Client sends a TON TX:
    - destination: address, amount: amount
-   - body: Cell(uint32=0x50415900, string=nonce)
+   - body: Cell(uint32=0x50415900, string=memo)   ← use `memo`, NOT `nonce`, here
 
-4. Client POST /invoke {tx, nonce, capability, body}
-5. Sidecar verifies: TX exists, amount >= price, nonce matches, TX not already used
+4. Client POST /invoke {proof, nonce, capability, body}   ← `proof` is v2 (`tx` still accepted as alias).
+   Use `nonce` (the full value), NOT `memo`, here.
+5. Sidecar verifies: TX exists, amount >= price, claim secret matches, TX not already used
 6. Sidecar runs the agent and returns the result
+
+Do not conflate `memo` and `nonce` — sending `nonce` on-chain leaks the secret to any chain
+watcher; sending `memo` as the claim value will be rejected (missing secret half).
 
 ## Opcodes
 

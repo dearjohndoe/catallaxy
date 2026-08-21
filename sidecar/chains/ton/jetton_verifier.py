@@ -31,6 +31,7 @@ class JettonPaymentVerifier:
         payment_timeout_seconds: int,
         testnet: bool = False,
         tonapi_client: TonAPIClient | None = None,
+        jetton_wallet_code_hex: str | None = None,
     ) -> None:
         self._agent_wallet = agent_wallet
         self._usdt_master = usdt_master
@@ -42,18 +43,15 @@ class JettonPaymentVerifier:
         self.jetton_wallet_address: str = ""
         self._tonapi_client = tonapi_client
         self._relay_client: _RelayClient | None = None
+        # None → Tether USDT (stablecoin packing + pinned code). Set only for
+        # a custom TEP-74 minter (e2e CTLXUSDT); must not be set on mainnet.
+        self._jetton_wallet_code_hex = jetton_wallet_code_hex
 
     async def start(self) -> None:
-        from tonutils.contracts.jetton.master import JettonMasterStablecoin
-        from chains.ton.jetton import USDT_JETTON_WALLET_CODE_HEX
+        from chains.ton.jetton import derive_agent_jetton_wallet
 
-        addr = JettonMasterStablecoin.calculate_user_jetton_wallet_address(
-            owner_address=self._agent_wallet,
-            jetton_master_address=self._usdt_master,
-            jetton_wallet_code=USDT_JETTON_WALLET_CODE_HEX,
-        )
-        self.jetton_wallet_address = addr.to_str(
-            is_user_friendly=True, is_bounceable=False,
+        self.jetton_wallet_address = derive_agent_jetton_wallet(
+            self._agent_wallet, self._usdt_master, self._jetton_wallet_code_hex,
         )
 
         relay_url = get_relay_url()

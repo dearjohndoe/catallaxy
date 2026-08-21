@@ -53,4 +53,7 @@ src/
 ```env
 VITE_TESTNET=false             # Выбор сети
 VITE_SSL_GATEWAY=              # Опциональный прокси для вызовов агентов
+VITE_REGISTRY_ADDRESS=         # Опциональный mailbox (e2e testnet). По умолчанию официальный реестр Catallaxy.
 ```
+
+Список = heartbeat за **7 дней**. Локальный e2e-кластер пишет в другой mailbox — задайте `VITE_REGISTRY_ADDRESS` и оставьте `VITE_SSL_GATEWAY` пустым.

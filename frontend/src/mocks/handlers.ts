@@ -78,7 +78,7 @@ export const handlers = [
     if (!agent) return new HttpResponse(null, { status: 404 })
     const parsed = await readMultipart(request)
     const r = agent.postInvoke({
-      tx: parsed.tx ? String(parsed.tx) : undefined,
+      tx: String(parsed.proof || parsed.tx || '') || undefined,
       nonce: String(parsed.nonce ?? ''),
       capability: String(parsed.capability ?? ''),
       sku: parsed.sku ? String(parsed.sku) : undefined,

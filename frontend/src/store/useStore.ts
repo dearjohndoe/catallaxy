@@ -20,6 +20,7 @@ interface Store {
   refresh: () => Promise<void>
   loadMore: () => Promise<void>
   fetchMore: () => Promise<void>
+  patchAgent: (sidecarId: string, patch: Partial<Agent>) => void
 }
 
 function mergeAgents(existing: Agent[], incoming: Agent[]): Agent[] {
@@ -91,6 +92,14 @@ export const useStore = create<Store>()(
         } finally {
           set({ loading: false })
         }
+      },
+
+      patchAgent: (sidecarId, patch) => {
+        set(s => ({
+          allAgents: s.allAgents.map(a =>
+            a.sidecarId === sidecarId ? { ...a, ...patch } : a,
+          ),
+        }))
       },
 
       loadMore: async () => {

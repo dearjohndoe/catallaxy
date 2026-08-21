@@ -16,6 +16,34 @@ USDT_JETTON_WALLET_CODE_HEX = (
     "35be76b5fd4bd5d8af2b7c3d68"
 )
 
+
+def derive_agent_jetton_wallet(owner: str, master: str, wallet_code_hex: str | None = None) -> str:
+    """Jetton-wallet address for ``owner`` on ``master``.
+
+    Default (no ``wallet_code_hex``): Tether USDT layout
+    (``JettonMasterStablecoin`` + pinned wallet code). Custom testnet
+    minters (TEP-74 standard) pass their own wallet-code hex and use
+    ``JettonMasterStandard`` packing. Mainnet callers must omit the override.
+    """
+    from tonutils.contracts.jetton.master import (
+        JettonMasterStablecoin,
+        JettonMasterStandard,
+    )
+
+    if wallet_code_hex:
+        addr = JettonMasterStandard.calculate_user_jetton_wallet_address(
+            owner_address=owner,
+            jetton_master_address=master,
+            jetton_wallet_code=wallet_code_hex,
+        )
+    else:
+        addr = JettonMasterStablecoin.calculate_user_jetton_wallet_address(
+            owner_address=owner,
+            jetton_master_address=master,
+            jetton_wallet_code=USDT_JETTON_WALLET_CODE_HEX,
+        )
+    return addr.to_str(is_user_friendly=True, is_bounceable=False)
+
 # Refund fee in micro-USDT (6 decimals). Jetton refund gas is paid in TONs,
 # but we need to reserve some USDT to cover the refund fee when refunding jettons.
 # Kept symbolic to match the TON rail's ~0.0005 TON (~$0.001) withholding.

@@ -1,6 +1,7 @@
 import axios from 'axios'
 import { SSL_GATEWAY } from '../config'
-import type { Sku, TypedResult } from '../types'
+import type { ArgSchema, ResultSchema, Sku, TypedResult } from '../types'
+import { sanitizeImageList, sanitizeImageUrl } from './imageProxy'
 
 /**
  * Decides whether to call the agent directly or via ssl-gateway.
@@ -67,7 +68,10 @@ export interface InvokeResult {
 export interface PaymentRequest {
   address: string
   amount: string
+  /** Full claim nonce (`pub+sec:sidecar_id`). Never put this on-chain. */
   nonce: string
+  /** Public-only half (`pub:sidecar_id`). Goes in the payment cell / rating. */
+  memo: string
   rail?: string
 }
 
@@ -76,6 +80,8 @@ export interface PaymentOption {
   address: string
   amount: string
   memo: string
+  /** Full claim value. Distinct from `memo`. */
+  nonce?: string
   token?: { symbol: string; master: string; decimals: number }
 }
 
@@ -126,12 +132,17 @@ export async function invokePreflight(
         address: pr.address,
         amount: pr.amount,
         memo: pr.memo,
+        nonce: pr.nonce,
       }]
+      const primary = options[0] ?? pr
+      const memo = String(primary.memo ?? pr.memo ?? '')
+      const claimNonce = String(primary.nonce ?? pr.nonce ?? memo)
       return {
         paymentRequest: {
           address: pr.address,
           amount: pr.amount,
-          nonce: pr.memo,
+          nonce: claimNonce,
+          memo,
           rail: pr.rail,
         },
         paymentOptions: options,
@@ -154,7 +165,8 @@ export async function invokeAgent(
 ): Promise<InvokeResult> {
   const form = buildMultipart(
     {
-      tx, nonce, capability,
+      // `proof` is v2; `tx` is the CTLX/1 alias so mixed-version sidecars work.
+      proof: tx, tx, nonce, capability,
       ...(quoteId ? { quote_id: quoteId } : {}),
       ...(rail ? { rail } : {}),
       ...(sku ? { sku } : {}),
@@ -249,6 +261,15 @@ export async function fetchQuote(
 export interface AgentInfo {
   skus: Sku[]
   paymentRails: string[]
+  name?: string
+  description?: string
+  capabilities?: string[]
+  argsSchema?: Record<string, ArgSchema>
+  resultSchema?: ResultSchema
+  hasQuote?: boolean
+  previewUrl?: string
+  avatarUrl?: string
+  images?: string[]
 }
 
 export async function fetchAgentInfo(endpoint: string): Promise<AgentInfo> {
@@ -268,7 +289,19 @@ export async function fetchAgentInfo(endpoint: string): Promise<AgentInfo> {
       }))
     : []
   const paymentRails: string[] = Array.isArray(data?.payment_rails) ? data.payment_rails : []
-  return { skus, paymentRails }
+  return {
+    skus,
+    paymentRails,
+    name: typeof data?.name === 'string' ? data.name : undefined,
+    description: typeof data?.description === 'string' ? data.description : undefined,
+    capabilities: Array.isArray(data?.capabilities) ? data.capabilities.map(String) : undefined,
+    argsSchema: data?.args_schema && typeof data.args_schema === 'object' ? data.args_schema : undefined,
+    resultSchema: data?.result_schema && typeof data.result_schema === 'object' ? data.result_schema : undefined,
+    hasQuote: data?.has_quote === true ? true : undefined,
+    previewUrl: sanitizeImageUrl(data?.preview_url) ?? undefined,
+    avatarUrl: sanitizeImageUrl(data?.avatar_url) ?? undefined,
+    images: sanitizeImageList(data?.images),
+  }
 }
 
 export async function pingAgent(endpoint: string): Promise<boolean> {
