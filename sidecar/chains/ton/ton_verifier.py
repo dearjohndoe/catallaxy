@@ -49,13 +49,15 @@ class PaymentVerifier:
         relay_url = get_relay_url()
         if relay_url:
             self._relay_client = _RelayClient(relay_url)
-            await self._relay_client.subscribe(
+            # Monitor exists before /subscribe succeeds so the process is not
+            # left half-dead; is_healthy stays False until the relay accepts us.
+            self._monitor = RemoteWalletMonitor(self._relay_client, self._agent_wallet)
+            await self._monitor.start()
+            await self._relay_client.subscribe_or_keep_trying(
                 agent_wallet=self._agent_wallet,
                 jetton_wallet=None,
                 label=None,
             )
-            self._monitor = RemoteWalletMonitor(self._relay_client, self._agent_wallet)
-            await self._monitor.start()
             logger.info("PaymentVerifier started in REMOTE mode via %s", relay_url)
             return
 

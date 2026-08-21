@@ -59,15 +59,15 @@ class JettonPaymentVerifier:
             # Remote mode — relay watches the jetton wallet for us. No LiteBalancer
             # involved at any point.
             self._relay_client = _RelayClient(relay_url)
-            await self._relay_client.subscribe(
-                agent_wallet=None,
-                jetton_wallet=self.jetton_wallet_address,
-                label=None,
-            )
             self._monitor = RemoteJettonWalletMonitor(
                 self._relay_client, self.jetton_wallet_address,
             )
             await self._monitor.start()
+            await self._relay_client.subscribe_or_keep_trying(
+                agent_wallet=None,
+                jetton_wallet=self.jetton_wallet_address,
+                label=None,
+            )
             logger.info(
                 "JettonPaymentVerifier started in REMOTE mode: jetton_wallet=%s",
                 self.jetton_wallet_address,

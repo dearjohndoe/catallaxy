@@ -10,6 +10,9 @@ import pytest
 from chains.ton.remote_monitor import (
     RemoteJettonWalletMonitor,
     RemoteWalletMonitor,
+    _RelayClient,
+    _RetryableSubscribeError,
+    _UNHEALTHY_CHECK_INTERVAL,
     _wrap_jetton_entry,
     _wrap_ton_tx,
 )
@@ -134,3 +137,171 @@ def test_remote_monitor_is_healthy_returns_cached_true_initially():
     m = RemoteWalletMonitor(relay, account_id="0:agent")
     # No event loop running here — should just return True without scheduling refresh.
     assert m.is_healthy() is True
+
+
+def _client(**kwargs) -> _RelayClient:
+    defaults = dict(
+        subscribe_budget=0.2,
+        subscribe_initial_delay=0.01,
+        subscribe_max_delay=0.04,
+    )
+    defaults.update(kwargs)
+    return _RelayClient("http://relay.test", **defaults)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_retries_then_succeeds():
+    client = _client()
+    calls = {"n": 0}
+
+    async def once(*_a, **_k):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _RetryableSubscribeError("refused")
+        return {"ok": True}
+
+    client._subscribe_once = once  # type: ignore[method-assign]
+    result = await client.subscribe(None, None, None)
+    assert result == {"ok": True}
+    assert calls["n"] == 3
+    assert client.is_subscribed is True
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_success_first_try_does_not_sleep(monkeypatch):
+    slept: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        slept.append(delay)
+
+    monkeypatch.setattr("chains.ton.remote_monitor.asyncio.sleep", fake_sleep)
+    client = _client()
+
+    async def once(*_a, **_k):
+        return {"ok": True}
+
+    client._subscribe_once = once  # type: ignore[method-assign]
+    await client.subscribe(None, None, None)
+    assert slept == []
+    assert client.is_subscribed is True
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_budget_exhausted_raises():
+    client = _client(subscribe_budget=0.05)
+
+    async def once(*_a, **_k):
+        raise _RetryableSubscribeError("refused")
+
+    client._subscribe_once = once  # type: ignore[method-assign]
+    with pytest.raises(_RetryableSubscribeError, match="refused"):
+        await client.subscribe(None, None, None)
+    assert client.is_subscribed is False
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_4xx_does_not_retry():
+    client = _client()
+    calls = {"n": 0}
+
+    async def once(*_a, **_k):
+        calls["n"] += 1
+        raise RuntimeError("relay /subscribe HTTP 400: bad wallet")
+
+    client._subscribe_once = once  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="400"):
+        await client.subscribe(None, None, None)
+    assert calls["n"] == 1
+    assert client.is_subscribed is False
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_or_keep_trying_recovers_in_background():
+    client = _client(subscribe_budget=0.04, subscribe_initial_delay=0.01, subscribe_max_delay=0.02)
+    allow = asyncio.Event()
+
+    async def once(*_a, **_k):
+        if not allow.is_set():
+            raise _RetryableSubscribeError("refused")
+        return {"ok": True}
+
+    client._subscribe_once = once  # type: ignore[method-assign]
+    try:
+        await client.subscribe_or_keep_trying("EQagent", None, "lbl")
+        assert client.is_subscribed is False
+        assert client._resubscribe_task is not None
+        allow.set()
+        for _ in range(80):
+            if client.is_subscribed:
+                break
+            await asyncio.sleep(0.02)
+        assert client.is_subscribed is True
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_is_healthy_false_until_subscribed():
+    relay = MagicMock()
+    relay.is_subscribed = False
+    m = RemoteWalletMonitor(relay, account_id="0:agent")
+    assert m.is_healthy() is False
+    relay.is_subscribed = True
+    # Optimistic cache still True until the first refresh lands.
+    assert m.is_healthy() is True
+
+
+@pytest.mark.asyncio
+async def test_is_healthy_holds_strong_ref_until_refresh_completes():
+    relay = MagicMock()
+    relay.is_subscribed = True
+    started = asyncio.Event()
+
+    async def slow_health() -> dict:
+        started.set()
+        await asyncio.sleep(0.05)
+        return {"last_sync_at": 1}
+
+    relay.health = slow_health
+    m = RemoteWalletMonitor(relay, account_id="0:agent")
+    m._health_cache = (0.0, False)
+    assert m.is_healthy() is False
+    task = m._pending_refresh
+    assert task is not None
+    await started.wait()
+    assert not task.done()
+    await task
+    assert m._health_cache[1] is True
+    await m.stop()
+
+
+@pytest.mark.asyncio
+async def test_unhealthy_cache_expires_quickly():
+    relay = MagicMock()
+    relay.is_subscribed = True
+    relay.health = AsyncMock(return_value={"last_sync_at": 1})
+    m = RemoteWalletMonitor(relay, account_id="0:agent")
+    now = time.time()
+    m._health_cache = (now, False)
+    assert m.is_healthy() is False
+    assert m._pending_refresh is None
+    m._health_cache = (now - (_UNHEALTHY_CHECK_INTERVAL + 0.5), False)
+    assert m.is_healthy() is False
+    assert m._pending_refresh is not None
+    await m._pending_refresh
+    assert m._health_cache[1] is True
+    await m.stop()
+
+
+@pytest.mark.asyncio
+async def test_healthy_cache_does_not_reschedule_within_interval():
+    relay = MagicMock()
+    relay.is_subscribed = True
+    m = RemoteWalletMonitor(relay, account_id="0:agent")
+    m._health_cache = (time.time(), True)
+    assert m.is_healthy() is True
+    assert m._pending_refresh is None
