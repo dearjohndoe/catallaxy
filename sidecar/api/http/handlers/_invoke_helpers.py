@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
-from chains.base import ChainRail, chain_for_rail, namespaced_tx_key
-from payments import PaymentVerificationError, mint_nonce
+from chains.base import ChainRail, chain_for_rail, namespaced_pub_key, namespaced_tx_key
+from payments import PaymentVerificationError, mint_nonce, pub_from_nonce
 from settings import AgentSku
 
 from api.http.responses import render_done_response
@@ -33,6 +33,18 @@ def unlock_quote(quote_id: str | None, sidecar: "SidecarApp") -> None:
         sidecar.quotes[quote_id].locked = False
 
 
+def payment_identity_key(rail: str, nonce: str) -> str | None:
+    """Refund-queue / claim-block key: ``{chain}:pub:{pub}``.
+
+    ``nonce`` is a full claim nonce or the rebound pub_nonce. Client ``tx``
+    is never part of this key.
+    """
+    pub = pub_from_nonce(nonce)
+    if pub is None:
+        return None
+    return namespaced_pub_key(chain_for_rail(rail), pub)
+
+
 async def enqueue_refund_after_payment(
     *,
     sidecar: "SidecarApp",
@@ -51,16 +63,25 @@ async def enqueue_refund_after_payment(
     ``mark_processed`` has already run but service was NOT delivered.
     """
     unlock_quote(parsed.quote_id, sidecar)
-    try:
-        await sidecar.refund_queue.enqueue(
-            tx_hash=namespaced_tx_key(chain_for_rail(parsed.rail), parsed.tx_hash),
-            nonce=parsed.nonce,
-            rail=parsed.rail,
-            sender=sender,
-            amount=amount,
-            sku_id=sku.sku_id,
-            force_refund=force,
+    queue_key = payment_identity_key(parsed.rail, parsed.nonce)
+    if queue_key is None:
+        # Should be unreachable after split-nonce rebind; never fall back to
+        # client tx (that was the refund+goods split).
+        logger.error(
+            "refund enqueue missing pub identity rail=%s nonce=%s tx=%s",
+            parsed.rail, parsed.nonce, parsed.tx_hash,
         )
+    try:
+        if queue_key is not None:
+            await sidecar.refund_queue.enqueue(
+                tx_hash=queue_key,
+                nonce=parsed.nonce,
+                rail=parsed.rail,
+                sender=sender,
+                amount=amount,
+                sku_id=sku.sku_id,
+                force_refund=force,
+            )
     except Exception:
         # Last resort: queue itself unavailable. Log loudly — ops must reconcile
         # manually. We still return refund_pending so the caller doesn't retry
@@ -214,12 +235,19 @@ async def verify_payment(
                 # (start() failed at boot).
                 bootstrapped = await sidecar.ensure_jetton_verifier()
                 if not bootstrapped:
-                    await sidecar.refund_queue.enqueue(
-                        tx_hash=namespaced_tx_key(chain_for_rail("USDT"), parsed.tx_hash),
-                        nonce=parsed.nonce,
-                        rail="USDT",
-                        sku_id=sku.sku_id,
-                    )
+                    usdt_key = payment_identity_key("USDT", parsed.nonce)
+                    if usdt_key is None:
+                        logger.error(
+                            "USDT refund enqueue missing pub identity nonce=%s tx=%s",
+                            parsed.nonce, parsed.tx_hash,
+                        )
+                    else:
+                        await sidecar.refund_queue.enqueue(
+                            tx_hash=usdt_key,
+                            nonce=parsed.nonce,
+                            rail="USDT",
+                            sku_id=sku.sku_id,
+                        )
                     unlock_quote(parsed.quote_id, sidecar)
                     logger.warning(
                         "USDT payment received but jetton_verifier unavailable — "
@@ -318,12 +346,15 @@ async def claim_stock(
         refund_tx: str | None = None
         refund_send_failed = False
         try:
+            oos_key = payment_identity_key(parsed.rail, parsed.nonce)
+            if oos_key is None:
+                oos_key = namespaced_tx_key(
+                    chain_for_rail(parsed.rail), verified_payment.tx_hash,
+                )
             refund_tx = await sidecar.refund_user(
                 recipient=verified_payment.sender,
                 payment_amount=verified_payment.amount,
-                original_tx_hash=namespaced_tx_key(
-                    chain_for_rail(parsed.rail), verified_payment.tx_hash,
-                ),
+                original_tx_hash=oos_key,
                 reason="out_of_stock",
                 rail=parsed.rail,
             )

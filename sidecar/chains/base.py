@@ -12,9 +12,10 @@ from typing import Any, Protocol, runtime_checkable
 from payments.types import VerifiedPayment
 
 
-# Persisted tx identifiers (processed_txs dedup keys, refund_queue PKs, and the
-# refund memo's "tx" field) are namespaced ``{chain}:{tx_hash}`` so identifiers
-# from different chains can never collide. Both TON rails settle on "ton".
+# Persisted identifiers: processed_txs records both ``{chain}:{tx_hash}``
+# (canonical after verify) and ``{chain}:pub:{pub}`` (claim-block identity).
+# refund_queue PK and the refund memo's "tx" field are ``{chain}:pub:{pub}``.
+# Both TON rails settle on "ton".
 _RAIL_TO_CHAIN = {"TON": "ton", "USDT": "ton"}
 
 
@@ -30,6 +31,18 @@ def namespaced_tx_key(chain: str, tx_hash: str) -> str:
     if ":" in tx_hash:
         return tx_hash
     return f"{chain}:{tx_hash}"
+
+
+def namespaced_pub_key(chain: str, pub: str) -> str:
+    """Payment identity before the on-chain hash is known: ``{chain}:pub:{pub}``.
+
+    Distinct from ``namespaced_tx_key`` so an 8-hex client-supplied ``tx`` cannot
+    alias a split-nonce ``pub``. Idempotent on values that already contain
+    ``:pub:``.
+    """
+    if ":pub:" in pub:
+        return pub
+    return f"{chain}:pub:{pub}"
 
 
 @runtime_checkable

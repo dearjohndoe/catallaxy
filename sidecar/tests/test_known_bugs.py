@@ -303,7 +303,7 @@ async def test_uploaded_file_cleaned_on_duplicate_tx(bug_client):
     form = FormData()
     form.add_field("capability", "translate")
     form.add_field("tx", "dup-tx")
-    form.add_field("nonce", "n:sid-test")
+    form.add_field("nonce", VALID_NONCE)
     form.add_field("body_json", json.dumps({"text": "hi"}))
     form.add_field("file:image", io.BytesIO(b"LEAK-ME-4"),
                    filename="leak4.png", content_type="image/png")
@@ -636,6 +636,96 @@ async def test_ton_payment_rejected_when_price_unavailable(tmp_path, monkeypatch
 
 
 # ────────────────────────────────────────────────────────────────────────
+# P0 — client tx ≠ verified hash must not split refund + goods
+# ────────────────────────────────────────────────────────────────────────
+
+async def test_fake_tx_preverify_refund_blocks_claim_on_real_hash(tmp_path, monkeypatch):
+    """Pay with real nonce, invoke with fake ``tx`` on a pre-verify refund
+    path (dynamic TON price missing). Queue key is ``ton:pub:{pub}``. A
+    follow-up claim with the real on-chain hash and the same nonce must
+    not deliver — it hits the pub-keyed refund row.
+    """
+    import api as api_module
+    from aiohttp.test_utils import TestClient, TestServer
+    from unittest.mock import AsyncMock
+
+    dynamic_sku = AgentSku(
+        sku_id="dyn", title="dyn",
+        price_ton=0, price_usd=0,
+        initial_stock=None,
+    )
+    settings = _make_settings(
+        tmp_path,
+        skus=(dynamic_sku,),
+        agent_price=0,
+        agent_price_usdt=0,
+        payment_rails=("TON", "USDT"),
+    )
+    app = SidecarApp(settings)
+    app.sidecar_id = "sid-test"
+    app.args_schema = {"text": {"type": "string", "required": True}}
+    app._file_store_dir.mkdir(parents=True, exist_ok=True)
+
+    async def fake_run(**kwargs):
+        return {"prices": {"dyn": {"usd": 1_000_000}}}
+
+    monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
+
+    async def fake_startup():
+        app._file_store_dir.mkdir(parents=True, exist_ok=True)
+        await app.stock.init(app.settings.skus)
+        await app.refund_queue.init()
+
+    async def fake_shutdown():
+        await app.refund_queue.close()
+        await app.tx_store.close()
+        await app.stock.close()
+
+    app.startup = fake_startup  # type: ignore[method-assign]
+    app.shutdown = fake_shutdown  # type: ignore[method-assign]
+    web_app = app.build_web_app()
+    web_app.on_startup.clear()
+    web_app.on_shutdown.clear()
+    web_app.on_startup.append(lambda _: fake_startup())
+    web_app.on_shutdown.append(lambda _: fake_shutdown())
+
+    app.tx_store.is_processed = AsyncMock(return_value=False)
+    app.verifier.verify = AsyncMock(return_value=VerifiedPayment(
+        tx_hash="real-hash", sender="EQsender", recipient="EQagent",
+        amount=1_000_000, comment="n:sid-test",
+    ))
+    await _seed_claim_secret(app)
+
+    async with TestClient(TestServer(web_app)) as c:
+        resp = await c.post("/invoke", json={
+            "capability": "translate",
+            "tx": "deadbeef",
+            "nonce": VALID_NONCE,
+            "rail": "TON",
+            "body": {"text": "hello"},
+        })
+        assert resp.status == 503
+        assert (await resp.json()).get("refund_pending") is True
+        pub_key = f"ton:pub:{VALID_PUB}"
+        entry = await app.refund_queue.get(pub_key)
+        assert entry is not None and entry.status == "pending"
+        assert await app.refund_queue.get("ton:deadbeef") is None
+
+        # Same nonce, real hash: must not reach verify / delivery.
+        resp2 = await c.post("/invoke", json={
+            "capability": "translate",
+            "tx": "real-hash",
+            "nonce": VALID_NONCE,
+            "rail": "TON",
+            "body": {"text": "hello"},
+        })
+        assert resp2.status == 409
+        data2 = await resp2.json()
+        assert data2.get("refund_pending") is True
+        app.verifier.verify.assert_not_called()
+
+
+# ────────────────────────────────────────────────────────────────────────
 # BUG 9 — USDT payment with absent jetton_verifier silently lost (no refund)
 # ────────────────────────────────────────────────────────────────────────
 
@@ -718,11 +808,12 @@ async def test_refund_queue_enqueues_usdt_when_verifier_unavailable(tmp_path, mo
 
         # Tx must be persisted in the refund queue for the worker to pick up.
         # Key is chain-namespaced now; the response "tx" field stays bare (above).
-        entry = await app.refund_queue.get("ton:lost-usdt-tx")
+        entry = await app.refund_queue.get(f"ton:pub:{VALID_PUB}")
         assert entry is not None
         assert entry.status == "pending"
         assert entry.rail == "USDT"
         assert entry.sku_id == "dyn"
+        assert await app.refund_queue.get("ton:lost-usdt-tx") is None
 
 
 async def test_invoke_blocks_retry_for_tx_in_refund_queue(tmp_path, monkeypatch):
@@ -762,7 +853,8 @@ async def test_invoke_blocks_retry_for_tx_in_refund_queue(tmp_path, monkeypatch)
         await app.refund_queue.init()
         # Pre-seed the queue as if a previous request enqueued this tx.
         await app.refund_queue.enqueue(
-            tx_hash="ton:queued-tx", nonce="abc:sid-test", rail="USDT", sku_id="dyn",
+            tx_hash=f"ton:pub:{VALID_PUB}", nonce=f"{VALID_PUB}:sid-test",
+            rail="USDT", sku_id="dyn",
         )
 
     async def fake_shutdown():
@@ -790,7 +882,7 @@ async def test_invoke_blocks_retry_for_tx_in_refund_queue(tmp_path, monkeypatch)
         resp = await c.post("/invoke", json={
             "capability": "translate",
             "tx": "queued-tx",
-            "nonce": "abc:sid-test",
+            "nonce": VALID_NONCE,
             "rail": "USDT",
             "body": {"text": "hello"},
         })
@@ -904,7 +996,7 @@ async def test_mark_processed_failure_after_verify_enqueues_refund(tmp_path, mon
         assert resp.status == 503
         data = await resp.json()
         assert data["refund_pending"] is True
-        entry = await app.refund_queue.get("ton:real-hash")
+        entry = await app.refund_queue.get(f"ton:pub:{VALID_PUB}")
         assert entry is not None
         assert entry.status == "pending"
         assert entry.sender == "EQsender"
@@ -912,6 +1004,7 @@ async def test_mark_processed_failure_after_verify_enqueues_refund(tmp_path, mon
         # No force_refund — mark_processed never succeeded so the worker's
         # is_processed race-guard is safe.
         assert entry.force_refund == 0
+        assert await app.refund_queue.get("ton:real-hash") is None
 
 
 async def test_mark_processed_integrity_error_returns_409_no_refund(tmp_path, monkeypatch):
@@ -933,8 +1026,8 @@ async def test_mark_processed_integrity_error_returns_409_no_refund(tmp_path, mo
         data = await resp.json()
         assert data["error"] == "Transaction already used"
         # Queue must be untouched.
-        entry = await app.refund_queue.get("real-hash")
-        assert entry is None
+        assert await app.refund_queue.get("real-hash") is None
+        assert await app.refund_queue.get(f"ton:pub:{VALID_PUB}") is None
 
 
 async def test_jobs_submit_failure_enqueues_refund_with_force(tmp_path, monkeypatch):
@@ -954,11 +1047,12 @@ async def test_jobs_submit_failure_enqueues_refund_with_force(tmp_path, monkeypa
         assert resp.status == 503
         data = await resp.json()
         assert data["refund_pending"] is True
-        entry = await app.refund_queue.get("ton:real-hash")
+        entry = await app.refund_queue.get(f"ton:pub:{VALID_PUB}")
         assert entry is not None
         assert entry.force_refund == 1, (
             "mark_processed already ran — worker must bypass is_processed guard"
         )
+        assert await app.refund_queue.get("ton:real-hash") is None
 
 
 async def test_refund_worker_force_refund_bypasses_is_processed_guard(tmp_path):

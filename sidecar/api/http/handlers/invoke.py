@@ -14,7 +14,7 @@ from aiohttp import web
 
 from payments import parse_nonce, split_full_nonce
 from settings import AgentSku, SkuKind
-from chains.base import chain_for_rail, namespaced_tx_key
+from chains.base import chain_for_rail, namespaced_pub_key, namespaced_tx_key
 
 from api.domain.invocation import create_runner
 from api.domain.pricing import resolve_sku
@@ -338,16 +338,23 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
             unlock_quote(parsed.quote_id, sidecar)
             return web.json_response({"error": "Nonce sidecar_id mismatch"}, status=402)
 
-        # Chain-namespaced storage key for this tx.
-        tx_key = namespaced_tx_key(chain_for_rail(parsed.rail), parsed.tx_hash)
-        if await sidecar.tx_store.is_processed(tx_key):
+        # Split before any storage lookup: claim-block and refund-queue keys
+        # are ``{chain}:pub:{pub}``, not the client-supplied tx/proof.
+        split = split_full_nonce(parsed.nonce)
+        if split is None:
+            unlock_quote(parsed.quote_id, sidecar)
+            return web.json_response({"error": "invalid or expired claim"}, status=403)
+        pub, pub_nonce, sec = split
+        identity_key = namespaced_pub_key(chain_for_rail(parsed.rail), pub)
+
+        if await sidecar.tx_store.is_processed(identity_key):
             unlock_quote(parsed.quote_id, sidecar)
             return web.json_response({"error": "Transaction already used"}, status=409)
 
-        # Block reprocessing of any tx that's already routed to the refund queue.
-        # Without this, a /invoke retry could race the refund worker and
-        # double-spend the same payment (consume service AND refund).
-        pending = await sidecar.refund_queue.get(tx_key)
+        # Block reprocessing of a payment already routed to the refund queue.
+        # Keyed by pub so a later claim with a different client tx cannot
+        # take goods after a pre-verify refund was queued.
+        pending = await sidecar.refund_queue.get(identity_key)
         if pending is not None:
             unlock_quote(parsed.quote_id, sidecar)
             if pending.status == "refunded":
@@ -372,17 +379,12 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
         # watcher can observe on-chain; `sec` never appears there, only in
         # the 402 response body delivered to whoever requested it. Runs
         # after the is_processed/refund-pending checks above (so legitimate
-        # retries on an already-settled tx still get those clearer errors)
+        # retries on an already-settled payment still get those clearer errors)
         # and before verify_payment (so a wrong guess never reaches chain
-        # RPC). Rejection here MUST NOT mark the tx processed, consume the
+        # RPC). Rejection here MUST NOT mark processed, consume the
         # nonce, or enqueue a refund — a subsequent claim with the correct
         # secret must still succeed (real payer isn't blocked by an
         # attacker's failed guess).
-        split = split_full_nonce(parsed.nonce)
-        if split is None:
-            unlock_quote(parsed.quote_id, sidecar)
-            return web.json_response({"error": "invalid or expired claim"}, status=403)
-        pub, pub_nonce, sec = split
         claim_row = await sidecar.claim_secrets.check(pub)
         if (
             claim_row is None
@@ -404,6 +406,8 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
         if isinstance(verified, web.Response):
             return verified
 
+        # Canonical id after verify is the on-chain hash, never client proof.
+        parsed = dataclasses.replace(parsed, tx_hash=verified.tx_hash, nonce=pub_nonce)
         verified_key = namespaced_tx_key(chain_for_rail(parsed.rail), verified.tx_hash)
         try:
             already = await sidecar.tx_store.is_processed(verified_key)
@@ -439,6 +443,18 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
                 sidecar=sidecar, parsed=parsed, sku=sku,
                 sender=verified.sender, amount=verified.amount,
                 reason="mark_processed_failed",
+            )
+
+        # Same payment under the pub identity so retries and the refund
+        # worker race-guard agree with the queue key. Best-effort: the
+        # hash row above is the exactly-once gate.
+        try:
+            await sidecar.tx_store.mark_processed(identity_key)
+        except aiosqlite.IntegrityError:
+            pass
+        except Exception:
+            logger.exception(
+                "tx_store.mark_processed failed for pub identity %s", identity_key,
             )
 
         # Post-success hygiene only, not a security gate: mark_processed's

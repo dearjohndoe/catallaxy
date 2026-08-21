@@ -604,10 +604,11 @@ async def test_invoke_proof_wins_over_tx_when_both_present(client, monkeypatch):
         },
     )
     assert resp.status == 200
-    # First is_processed call is the pre-verify gate, keyed by the client proof.
+    # Storage identity is pub, not either client proof field.
     first_key = app.tx_store.is_processed.await_args_list[0].args[0]
-    assert first_key.endswith("canonical-proof")
-    assert "legacy-tx" not in first_key
+    assert first_key == f"ton:pub:{VALID_PUB}"
+    # Wire: ``proof`` still wins over ``tx`` as the value passed to verify.
+    assert app.verifier.verify.await_args.kwargs["tx_hash"] == "canonical-proof"
 
 
 async def test_invoke_preflight_returns_503_when_monitor_unhealthy(client):
@@ -699,7 +700,7 @@ async def test_invoke_already_processed_tx_returns_409(client):
         json={
             "capability": "translate",
             "tx": "dup-tx",
-            "nonce": "n:sid-test",
+            "nonce": VALID_NONCE,
             "body": {"text": "hi"},
         },
     )
@@ -747,10 +748,11 @@ async def test_invoke_payment_verification_unexpected_enqueues_refund(client):
         assert resp.status == 503
         data = await resp.json()
         assert data["refund_pending"] is True
-        entry = await app.refund_queue.get("ton:txh")
+        entry = await app.refund_queue.get(f"ton:pub:{VALID_PUB}")
         assert entry is not None
         assert entry.status == "pending"
         assert entry.force_refund == 0  # pre-verify, not a force case
+        assert await app.refund_queue.get("ton:txh") is None
     finally:
         await app.refund_queue.close()
 
@@ -786,9 +788,13 @@ async def test_invoke_happy_path_runs_agent_and_returns_done(client, monkeypatch
     data = await resp.json()
     assert data["status"] == "done"
     assert data["result"] == {"type": "text", "data": "translated"}
-    # The mark was against the real on-chain hash, not the user-supplied one.
-    app.tx_store.mark_processed.assert_awaited_once_with("ton:real-hash")
+    # The mark was against the real on-chain hash, not the user-supplied one;
+    # pub identity is also recorded so retries/refund-worker key the same way.
+    marked = [c.args[0] for c in app.tx_store.mark_processed.await_args_list]
+    assert "ton:real-hash" in marked
+    assert f"ton:pub:{VALID_PUB}" in marked
     assert seen_env.get("CALLER_AMOUNT_NANO") == "5000000"
+    assert seen_env.get("CALLER_TX_HASH") == "real-hash"
     assert seen_env.get("PAYMENT_RAIL") == "TON"
 
 
@@ -1624,7 +1630,9 @@ async def test_invoke_usdt_happy_path_routes_to_jetton_verifier(app_factory, mon
         assert (await resp.json())["status"] == "done"
         app.jetton_verifier.verify.assert_awaited_once()
         # Marked against the real on-chain hash, not the user-supplied tx.
-        app.tx_store.mark_processed.assert_awaited_once_with("ton:usdt-hash")
+        marked = [c.args[0] for c in app.tx_store.mark_processed.await_args_list]
+        assert "ton:usdt-hash" in marked
+        assert f"ton:pub:{VALID_PUB}" in marked
 
 
 async def test_invoke_usdt_unavailable_verifier_enqueues_refund(app_factory):
@@ -1643,8 +1651,9 @@ async def test_invoke_usdt_unavailable_verifier_enqueues_refund(app_factory):
         })
         assert resp.status == 503
         assert (await resp.json())["refund_pending"] is True
-        entry = await app.refund_queue.get("ton:usdt-tx")
+        entry = await app.refund_queue.get(f"ton:pub:{VALID_PUB}")
         assert entry is not None and entry.rail == "USDT" and entry.status == "pending"
+        assert await app.refund_queue.get("ton:usdt-tx") is None
 
 
 async def test_invoke_stock_reserve_race_after_payment_refunds_and_returns_409(app_factory, tmp_path, monkeypatch):

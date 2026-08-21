@@ -79,6 +79,7 @@ async def test_frontrun_wrong_secret_rejected_no_side_effects(app_factory, tmp_p
         app.verifier.verify.assert_not_called()
         app.tx_store.mark_processed.assert_not_called()
         assert await app.refund_queue.get("ton:some-tx") is None
+        assert await app.refund_queue.get(f"ton:pub:{pub}") is None
 
         # Real payer retries with the correct secret and succeeds.
         async def fake_run(**kwargs):
@@ -93,7 +94,9 @@ async def test_frontrun_wrong_secret_rejected_no_side_effects(app_factory, tmp_p
         assert resp2.status == 200
         assert (await resp2.json())["status"] == "done"
         app.verifier.verify.assert_awaited_once()
-        app.tx_store.mark_processed.assert_awaited_once_with("ton:real-hash")
+        marked = [c.args[0] for c in app.tx_store.mark_processed.await_args_list]
+        assert "ton:real-hash" in marked
+        assert f"ton:pub:{pub}" in marked
 
 
 async def test_frontrun_missing_secret_rejected(app_factory, tmp_path):
@@ -152,7 +155,9 @@ async def test_happy_path_correct_secret_delivers_once(app_factory, tmp_path, mo
         assert resp.status == 200
         data = await resp.json()
         assert data["status"] == "done"
-        app.tx_store.mark_processed.assert_awaited_once_with("ton:real-hash")
+        marked = [c.args[0] for c in app.tx_store.mark_processed.await_args_list]
+        assert "ton:real-hash" in marked
+        assert f"ton:pub:{pub}" in marked
 
         # The verifier was called with the *public-only* half, not the full
         # nonce (sec never reaches the chain lookup).
@@ -267,7 +272,9 @@ async def test_retry_after_verify_timeout_succeeds_with_same_secret(app_factory,
         assert resp2.status == 200
         data2 = await resp2.json()
         assert data2["status"] == "done"
-        app.tx_store.mark_processed.assert_awaited_once_with("ton:slow-hash")
+        marked = [c.args[0] for c in app.tx_store.mark_processed.await_args_list]
+        assert "ton:slow-hash" in marked
+        assert f"ton:pub:{pub}" in marked
 
 
 # ── 402 mint wires the claim secret correctly ────────────────────────────

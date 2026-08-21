@@ -86,10 +86,13 @@ Two files: **`processed_txs.{slug}.db`** (tx dedup + refunds + free quota) and *
 
 ### `processed_txs.{slug}.db`
 ```sql
--- payment dedup; key is namespaced "{chain}:{tx_hash}"
+-- payment dedup. After verify: "{chain}:{on_chain_hash}". Also
+-- "{chain}:pub:{pub}" so retries/refund-worker agree with the queue key.
+-- Client-supplied tx/proof is never a storage key.
 processed_txs ( tx_hash TEXT PRIMARY KEY, created_at TEXT )
 
--- refund queue; states pending→refunding→refunded/failed/processed
+-- refund queue; PK is "{chain}:pub:{pub}", not the client tx.
+-- states pending→refunding→refunded/failed/processed
 pending_refunds (
   tx_hash TEXT PRIMARY KEY, nonce, rail, sender, amount, sku_id,
   status DEFAULT 'pending', refund_tx, attempts DEFAULT 0, last_error,

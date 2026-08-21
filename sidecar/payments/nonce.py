@@ -42,6 +42,26 @@ def mint_nonce(sidecar_id: str) -> tuple[str, str, str, str]:
     return pub, sec, _join_pub_nonce(pub, sidecar_id), f"{raw}:{sidecar_id}"
 
 
+def pub_from_nonce(nonce: str) -> str | None:
+    """Extract the 8-hex ``pub`` from a full claim nonce or a pub_nonce.
+
+    ``pubsec:sidecar_id`` (16 hex) → first 8; ``pub:sidecar_id`` (8 hex) → pub.
+    Malformed input returns ``None``.
+    """
+    if not nonce:
+        return None
+    hex_part, sep, _suffix = nonce.partition(":")
+    if not sep or not hex_part:
+        return None
+    if len(hex_part) not in (_PUB_LEN, _HEX_LEN):
+        return None
+    try:
+        int(hex_part, 16)
+    except ValueError:
+        return None
+    return hex_part[:_PUB_LEN]
+
+
 def split_full_nonce(full_nonce: str) -> tuple[str, str, str] | None:
     """Split a client-presented full claim nonce into ``(pub, pub_nonce, sec)``.
 

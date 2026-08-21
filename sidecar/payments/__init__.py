@@ -8,7 +8,7 @@ from .types import (
     NonceMeta,
     JettonPaymentTx,
 )
-from .nonce import parse_nonce, _parse_payment_nonce, mint_nonce, split_full_nonce
+from .nonce import parse_nonce, _parse_payment_nonce, mint_nonce, split_full_nonce, pub_from_nonce
 from .processed_tx import ProcessedTxStore
 from .free_claims import FreeClaimStore
 from .claim_secrets import ClaimSecretStore
@@ -38,6 +38,7 @@ __all__ = [
     "_parse_payment_nonce",
     "mint_nonce",
     "split_full_nonce",
+    "pub_from_nonce",
     "ProcessedTxStore",
     "FreeClaimStore",
     "ClaimSecretStore",
