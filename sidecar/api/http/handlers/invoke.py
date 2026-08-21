@@ -27,6 +27,7 @@ from api.http.handlers._invoke_helpers import (
     build_402_response,
     build_agent_payload,
     claim_stock,
+    consume_monitor_nonce,
     enqueue_refund_after_payment,
     unlock_quote,
     verify_payment,
@@ -409,6 +410,10 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
         # Canonical id after verify is the on-chain hash, never client proof.
         parsed = dataclasses.replace(parsed, tx_hash=verified.tx_hash, nonce=pub_nonce)
         verified_key = namespaced_tx_key(chain_for_rail(parsed.rail), verified.tx_hash)
+
+        async def evict_monitor() -> None:
+            await consume_monitor_nonce(sidecar, parsed.rail, parsed.nonce)
+
         try:
             already = await sidecar.tx_store.is_processed(verified_key)
         except Exception:
@@ -417,13 +422,16 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
             logger.exception(
                 "tx_store.is_processed failed after verify tx=%s", verified.tx_hash,
             )
-            return await enqueue_refund_after_payment(
+            resp = await enqueue_refund_after_payment(
                 sidecar=sidecar, parsed=parsed, sku=sku,
                 sender=verified.sender, amount=verified.amount,
                 reason="tx_store_unavailable",
             )
+            await evict_monitor()
+            return resp
         if already:
             unlock_quote(parsed.quote_id, sidecar)
+            await evict_monitor()
             return web.json_response({"error": "Transaction already used"}, status=409)
 
         try:
@@ -432,6 +440,7 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
             # A parallel /invoke for the same tx won the PRIMARY KEY race.
             # That request owns the service delivery; we just bow out.
             unlock_quote(parsed.quote_id, sidecar)
+            await evict_monitor()
             return web.json_response({"error": "Transaction already used"}, status=409)
         except Exception:
             # SQLite write failed (disk full, lock contention beyond 15s, etc.).
@@ -439,11 +448,13 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
             logger.exception(
                 "tx_store.mark_processed failed after verify tx=%s", verified.tx_hash,
             )
-            return await enqueue_refund_after_payment(
+            resp = await enqueue_refund_after_payment(
                 sidecar=sidecar, parsed=parsed, sku=sku,
                 sender=verified.sender, amount=verified.amount,
                 reason="mark_processed_failed",
             )
+            await evict_monitor()
+            return resp
 
         # Same payment under the pub identity so retries and the refund
         # worker race-guard agree with the queue key. Best-effort: the
@@ -456,6 +467,11 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
             logger.exception(
                 "tx_store.mark_processed failed for pub identity %s", identity_key,
             )
+
+        # Cache eviction only after the durable hash row exists. Replay is
+        # already gated by processed_txs; this is so the next poll does not
+        # keep serving a spent payment from RAM.
+        await evict_monitor()
 
         # Post-success hygiene only, not a security gate: mark_processed's
         # PRIMARY KEY already made this claim single-use. Best-effort so a

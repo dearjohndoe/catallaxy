@@ -127,6 +127,9 @@ stock_reservations ( key TEXT PRIMARY KEY, sku_id, expires_at, job_id, created_a
   `UPDATE … WHERE total-sold>0`; the ceiling is held by an in-process `asyncio.Lock` (`stock.py`).
   Correct single-process; two processes on one `stock.db` can oversell. Oversell across the
   preflight→pay→claim window is *compensated by refund*, not prevented.
+- **Monitor cache is not the exactly-once gate.** `verify` only peeks. Cache
+  eviction (`consume`) runs after a durable `mark_processed` or post-verify
+  refund enqueue. Replay is `processed_txs`.
 - **JobStore is in-memory.** A crash between `mark_processed` and job completion loses the job and
   does **not** enqueue a refund → silent loss. Durable job log is a v2 item.
 - **Claim is a bearer secret, not a wallet signature.** v2 splits the nonce (`pub` on-chain,

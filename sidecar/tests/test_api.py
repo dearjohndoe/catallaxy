@@ -611,6 +611,59 @@ async def test_invoke_proof_wins_over_tx_when_both_present(client, monkeypatch):
     assert app.verifier.verify.await_args.kwargs["tx_hash"] == "canonical-proof"
 
 
+async def test_invoke_consumes_monitor_only_after_mark_processed(client, monkeypatch):
+    """verify peeks; cache eviction runs after the durable processed_txs write."""
+    app: SidecarApp = client.sidecar
+    app.tx_store.is_processed = AsyncMock(return_value=False)
+    app.tx_store.mark_processed = AsyncMock()
+    app.verifier.verify = AsyncMock(return_value=VerifiedPayment(
+        tx_hash="real-hash", sender="EQsender", recipient="EQagent",
+        amount=5_000_000, comment=f"{VALID_PUB}:sid-test",
+    ))
+    app.verifier.consume = AsyncMock()
+    await _seed_claim_secret(app)
+
+    async def fake_run(**kwargs):
+        return {"result": {"type": "text", "data": "ok"}}
+
+    monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
+
+    resp = await client.post(
+        "/invoke",
+        json={
+            "capability": "translate",
+            "tx": "client-tx",
+            "nonce": VALID_NONCE,
+            "body": {"text": "hello"},
+        },
+    )
+    assert resp.status == 200
+    assert app.tx_store.mark_processed.await_count >= 1
+    app.verifier.consume.assert_awaited_once_with(f"{VALID_PUB}:sid-test")
+
+
+async def test_invoke_does_not_consume_on_verify_reject(client):
+    app: SidecarApp = client.sidecar
+    app.tx_store.is_processed = AsyncMock(return_value=False)
+    app.verifier.verify = AsyncMock(
+        side_effect=PaymentVerificationError("Transaction not found"),
+    )
+    app.verifier.consume = AsyncMock()
+    await _seed_claim_secret(app)
+
+    resp = await client.post(
+        "/invoke",
+        json={
+            "capability": "translate",
+            "tx": "missing",
+            "nonce": VALID_NONCE,
+            "body": {"text": "hello"},
+        },
+    )
+    assert resp.status == 402
+    app.verifier.consume.assert_not_awaited()
+
+
 async def test_invoke_preflight_returns_503_when_monitor_unhealthy(client):
     """Plan D: refuse preflight when the TON monitor has no fresh poll."""
     client.sidecar.verifier.is_healthy = lambda max_age_seconds=60.0: False  # type: ignore[method-assign]
@@ -735,6 +788,7 @@ async def test_invoke_payment_verification_unexpected_enqueues_refund(client):
     try:
         app.tx_store.is_processed = AsyncMock(return_value=False)
         app.verifier.verify = AsyncMock(side_effect=RuntimeError("rpc down"))
+        app.verifier.consume = AsyncMock()
         await _seed_claim_secret(app)
         resp = await client.post(
             "/invoke",
@@ -753,6 +807,39 @@ async def test_invoke_payment_verification_unexpected_enqueues_refund(client):
         assert entry.status == "pending"
         assert entry.force_refund == 0  # pre-verify, not a force case
         assert await app.refund_queue.get("ton:txh") is None
+        # Worker recovers sender/amount from the monitor cache — do not evict.
+        app.verifier.consume.assert_not_awaited()
+    finally:
+        await app.refund_queue.close()
+
+
+async def test_invoke_consumes_after_post_verify_refund(client):
+    """After verify succeeded, a failed mark still evicts — sender/amount are
+    already on the queue row, the worker does not need the cache."""
+    app: SidecarApp = client.sidecar
+    await app.refund_queue.init()
+    try:
+        app.tx_store.is_processed = AsyncMock(return_value=False)
+        app.tx_store.mark_processed = AsyncMock(side_effect=RuntimeError("disk full"))
+        app.verifier.verify = AsyncMock(return_value=VerifiedPayment(
+            tx_hash="real-hash", sender="EQsender", recipient="EQagent",
+            amount=5_000_000, comment=f"{VALID_PUB}:sid-test",
+        ))
+        app.verifier.consume = AsyncMock()
+        await _seed_claim_secret(app)
+        resp = await client.post(
+            "/invoke",
+            json={
+                "capability": "translate",
+                "tx": "user-tx",
+                "nonce": VALID_NONCE,
+                "body": {"text": "hi"},
+            },
+        )
+        assert resp.status == 503
+        app.verifier.consume.assert_awaited_once_with(f"{VALID_PUB}:sid-test")
+        entry = await app.refund_queue.get(f"ton:pub:{VALID_PUB}")
+        assert entry is not None and entry.sender == "EQsender"
     finally:
         await app.refund_queue.close()
 

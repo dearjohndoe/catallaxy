@@ -124,7 +124,33 @@ async def test_jetton_verifier_success_returns_onchain_hash():
     assert result.amount == 2_000_000
     assert result.recipient == "EQagent"
     assert result.comment == "abc:sid-test"
-    monitor.consume.assert_called_once_with("abc:sid-test")
+    monitor.consume.assert_not_called()
+
+
+async def test_jetton_verifier_success_leaves_cache_for_retry():
+    v = _verifier(min_amount=1_000)
+    entry = _jpx(amount=2_000_000, sender="EQpayer", now_ts=int(time.time()),
+                 nonce="abc:sid-test", hash_hex="dd" * 32)
+    cache = {"abc:sid-test": entry}
+
+    class _Mon:
+        async def get(self, n):
+            return cache.get(n.strip())
+
+        async def consume(self, n):
+            return cache.pop(n.strip(), None)
+
+        def force(self):
+            return None
+
+    v._monitor = _Mon()
+    first = await v.verify(tx_hash="user-supplied", raw_nonce="abc:sid-test")
+    assert first.tx_hash == "dd" * 32
+    assert "abc:sid-test" in cache
+    second = await v.verify(tx_hash="user-supplied", raw_nonce="abc:sid-test")
+    assert second.tx_hash == first.tx_hash
+    await v.consume("abc:sid-test")
+    assert "abc:sid-test" not in cache
 
 
 async def test_jetton_verifier_amount_below_min_rejected():
@@ -162,6 +188,7 @@ async def test_jetton_verifier_session_expired():
 
     with pytest.raises(PaymentVerificationError, match="session expired"):
         await v.verify("tx", "n:sid-test")
+    v._monitor.consume.assert_not_called()
 
 
 async def test_jetton_verifier_missing_sender_rejected():

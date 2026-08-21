@@ -72,3 +72,12 @@ class TonRail:
     def monitor_healthy(self, max_age_seconds: float = 60.0) -> bool:
         verifier = self._get_verifier()
         return bool(verifier is not None and verifier.is_healthy(max_age_seconds))
+
+    async def consume(self, nonce: str) -> None:
+        verifier = self._get_verifier()
+        if verifier is None:
+            return
+        try:
+            await verifier.consume(nonce)
+        except Exception:
+            logger.exception("TON rail consume failed nonce=%s", nonce)

@@ -173,9 +173,8 @@ class _BaseRemoteMonitor:
         self._relay = relay
         self._account_id = account_id
         self._label = label
-        # Local cache. Filled by get(); cleared by consume(). Replay protection
-        # ultimately lives in `tx_store.is_processed` — clearing here is just
-        # bookkeeping so a second verify on the same nonce doesn't see ghosts.
+        # Local cache. Filled by get(); cleared by consume() *after* a durable
+        # mark/enqueue. Replay protection lives in `tx_store.is_processed`.
         self._by_nonce: dict[str, Any] = {}
         self._last_successful_poll_at: float = 0.0
         # Cached health (avoid hammering /health on every is_healthy call)

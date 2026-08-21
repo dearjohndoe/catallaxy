@@ -147,7 +147,8 @@ class JettonPaymentVerifier:
                 if not entry.sender:
                     raise PaymentVerificationError("Transaction sender is missing")
 
-                await self._monitor.consume(nonce.value)
+                # Peek only — see PaymentVerifier.verify. Caller consumes after
+                # mark_processed / refund enqueue.
                 real_tx_hash = entry.tx.cell.hash.hex()
                 return VerifiedPayment(
                     tx_hash=real_tx_hash,
@@ -162,3 +163,14 @@ class JettonPaymentVerifier:
 
             self._monitor.force()
             await asyncio.sleep(self.VERIFY_POLL)
+
+    async def consume(self, raw_nonce: str) -> None:
+        """Drop ``raw_nonce`` from the monitor cache. Call only after a durable
+        ``mark_processed`` or refund enqueue. Best-effort, never raises."""
+        if self._monitor is None:
+            return
+        try:
+            nonce = parse_nonce(raw_nonce)
+            await self._monitor.consume(nonce.value)
+        except Exception:
+            logger.exception("JettonPaymentVerifier.consume failed nonce=%s", raw_nonce)

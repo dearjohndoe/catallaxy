@@ -33,6 +33,23 @@ def unlock_quote(quote_id: str | None, sidecar: "SidecarApp") -> None:
         sidecar.quotes[quote_id].locked = False
 
 
+async def consume_monitor_nonce(sidecar: "SidecarApp", rail: str, nonce: str) -> None:
+    """Evict ``nonce`` from the rail monitor cache after a durable write.
+
+    No-op if the rail is missing. Never raises. Must not run before
+    ``mark_processed`` / refund enqueue, and must not run on paths where
+    verify never succeeded (the refund worker recovers sender/amount from
+    the same cache).
+    """
+    try:
+        rail_obj = sidecar.rails.get(rail)
+        if rail_obj is None:
+            return
+        await rail_obj.consume(nonce)
+    except Exception:
+        logger.exception("consume_monitor_nonce failed rail=%s nonce=%s", rail, nonce)
+
+
 def payment_identity_key(rail: str, nonce: str) -> str | None:
     """Refund-queue / claim-block key: ``{chain}:pub:{pub}``.
 

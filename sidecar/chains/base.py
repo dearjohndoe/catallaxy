@@ -87,6 +87,14 @@ class ChainRail(Protocol):
         ``max_age_seconds`` — gates whether we advertise the rail."""
         ...
 
+    async def consume(self, nonce: str) -> None:
+        """Evict ``nonce`` from the monitor cache.
+
+        Call only after a durable ``mark_processed`` or refund enqueue.
+        Best-effort, never raises. ``verify`` must not call this.
+        """
+        ...
+
 
 @runtime_checkable
 class ChainRegistry(Protocol):

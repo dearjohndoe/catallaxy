@@ -173,3 +173,17 @@ def test_monitor_healthy_delegates_to_verifier():
     unhealthy = SimpleNamespace(is_healthy=lambda max_age_seconds=60.0: False)
     assert _ton_rail(verifier=healthy).monitor_healthy() is True
     assert _ton_rail(verifier=unhealthy).monitor_healthy() is False
+
+
+async def test_consume_delegates_to_verifier():
+    verifier = SimpleNamespace(consume=AsyncMock())
+    await _ton_rail(verifier=verifier).consume("pub:sid-test")
+    verifier.consume.assert_awaited_once_with("pub:sid-test")
+    usdt = SimpleNamespace(consume=AsyncMock())
+    await _usdt_rail(verifier=usdt).consume("pub:sid-test")
+    usdt.consume.assert_awaited_once_with("pub:sid-test")
+
+
+async def test_consume_noop_when_verifier_absent():
+    await _ton_rail(verifier=None).consume("n")
+    await _usdt_rail(verifier=None).consume("n")
