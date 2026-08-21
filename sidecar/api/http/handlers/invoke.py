@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 from aiohttp import web
 
-from payments import parse_nonce, split_full_nonce
+from payments import parse_nonce, split_full_nonce, PaymentIntentDraft, INTENT_REFUNDED
 from settings import AgentSku, SkuKind
 from chains.base import chain_for_rail, namespaced_pub_key, namespaced_tx_key
 
@@ -435,7 +435,17 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
             return web.json_response({"error": "Transaction already used"}, status=409)
 
         try:
-            await sidecar.tx_store.mark_processed(verified_key)
+            await sidecar.tx_store.mark_processed(
+                verified_key,
+                intent=PaymentIntentDraft(
+                    identity=identity_key,
+                    nonce=parsed.nonce,
+                    rail=parsed.rail,
+                    sender=verified.sender,
+                    amount=verified.amount,
+                    sku_id=sku.sku_id,
+                ),
+            )
         except aiosqlite.IntegrityError:
             # A parallel /invoke for the same tx won the PRIMARY KEY race.
             # That request owns the service delivery; we just bow out.
@@ -444,7 +454,8 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
             return web.json_response({"error": "Transaction already used"}, status=409)
         except Exception:
             # SQLite write failed (disk full, lock contention beyond 15s, etc.).
-            # Money is in but we can't record it. Queue for refund.
+            # Money is in but we can't record it. Queue for refund. Hash and
+            # intent share one txn, so a failure here means neither landed.
             logger.exception(
                 "tx_store.mark_processed failed after verify tx=%s", verified.tx_hash,
             )
@@ -483,6 +494,13 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
 
         reservation_key, created_reservation_keys, stock_err = await claim_stock(parsed, sku, sidecar, verified)
         if stock_err is not None:
+            try:
+                await sidecar.tx_store.set_intent_status(verified_key, INTENT_REFUNDED)
+            except Exception:
+                logger.exception(
+                    "set_intent_status refunded failed after stock error tx=%s",
+                    verified.tx_hash,
+                )
             return stock_err
 
         if parsed.quote_id and parsed.quote_id in sidecar.quotes:
@@ -508,6 +526,9 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
             reservation_key=reservation_key,
             owner_bot=sidecar.owner_bot,
             user_body=parsed.body,
+            on_intent=lambda status, key=verified_key: sidecar.tx_store.set_intent_status(
+                key, status,
+            ),
         )
         try:
             job_id = await sidecar.jobs.submit(runner)
@@ -517,12 +538,20 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
             logger.exception(
                 "jobs.submit failed after mark_processed tx=%s", verified.tx_hash,
             )
-            return await enqueue_refund_after_payment(
+            resp = await enqueue_refund_after_payment(
                 sidecar=sidecar, parsed=parsed, sku=sku,
                 sender=verified.sender, amount=verified.amount,
                 reason="job_submit_failed",
                 force=True,
             )
+            try:
+                await sidecar.tx_store.set_intent_status(verified_key, INTENT_REFUNDED)
+            except Exception:
+                logger.exception(
+                    "set_intent_status refunded failed after job_submit_failed tx=%s",
+                    verified.tx_hash,
+                )
+            return resp
         # Runner now owns uploaded_files and the reservation; outer finally
         # must not double-clean.
         ownership_transferred = True

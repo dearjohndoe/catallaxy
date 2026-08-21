@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, AsyncIterator
 from payments import PendingRefund
 
 from api.domain.refund import find_existing_refund_tx
+from payments.processed_tx import INTENT_REFUNDED
 
 if TYPE_CHECKING:
     from api.app import SidecarApp
@@ -34,6 +35,10 @@ async def refund_worker_loop(app: "SidecarApp") -> None:
         await _recover_stale_refunding(app, older_than_seconds=600)
     except Exception:
         logger.exception("refund_worker: stale recovery failed")
+    try:
+        await recover_stale_intents(app, older_than_seconds=_intent_stale_after(app))
+    except Exception:
+        logger.exception("refund_worker: stale intent recovery failed")
 
     while not app.stop_event.is_set():
         try:
@@ -116,7 +121,64 @@ async def _recover_stale_refunding(app: "SidecarApp", older_than_seconds: int) -
                 )
 
 
+def _intent_stale_after(app: "SidecarApp") -> int:
+    """Live jobs may still be running until final_timeout. Don't refund those."""
+    return max(int(getattr(app.settings, "final_timeout", 0) or 0), 0) + 30
+
+
+async def recover_stale_intents(app: "SidecarApp", older_than_seconds: int) -> None:
+    """accepted intents with no job: enqueue force_refund, then mark refunded.
+
+    Startup uses older_than_seconds=0 (process just came up, RAM jobs are
+    gone). The worker tick uses final_timeout+30 so a live runner is not
+    refunded out from under the buyer.
+    """
+    stale = await app.tx_store.list_stale_accepted(older_than_seconds)
+    if not stale:
+        return
+    logger.warning("refund_worker: recovering %d stale payment intents", len(stale))
+    for intent in stale:
+        try:
+            await app.refund_queue.enqueue(
+                tx_hash=intent.identity,
+                nonce=intent.nonce,
+                rail=intent.rail,
+                sender=intent.sender,
+                amount=intent.amount,
+                sku_id=intent.sku_id,
+                force_refund=True,
+            )
+        except Exception:
+            logger.exception(
+                "refund_worker: stale intent enqueue failed tx=%s identity=%s",
+                intent.tx_hash, intent.identity,
+            )
+            continue
+        try:
+            await app.tx_store.set_intent_status(intent.tx_hash, INTENT_REFUNDED)
+        except Exception:
+            logger.exception(
+                "refund_worker: stale intent status flip failed tx=%s", intent.tx_hash,
+            )
+            continue
+        logger.warning(
+            "refund_worker: stale payment intent queued for refund tx=%s identity=%s",
+            intent.tx_hash, intent.identity,
+        )
+        if app.owner_bot is not None:
+            app.owner_bot.notify_refund(
+                sender=intent.sender, amount=intent.amount, rail=intent.rail,
+                sku_id=intent.sku_id, tx_hash=intent.tx_hash,
+                reason="stale_payment_intent", refund_tx=None,
+                status="refund_pending",
+            )
+
+
 async def _tick(app: "SidecarApp") -> None:
+    try:
+        await recover_stale_intents(app, older_than_seconds=_intent_stale_after(app))
+    except Exception:
+        logger.exception("refund_worker: stale intent recovery failed")
     due = await app.refund_queue.fetch_due(limit=10)
     if not due:
         return

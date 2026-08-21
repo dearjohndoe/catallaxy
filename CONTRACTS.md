@@ -91,6 +91,12 @@ Two files: **`processed_txs.{slug}.db`** (tx dedup + refunds + free quota) and *
 -- Client-supplied tx/proof is never a storage key.
 processed_txs ( tx_hash TEXT PRIMARY KEY, created_at TEXT )
 
+-- crash recovery. Same txn as the hash row. accepted → fulfilled|refunded.
+-- PK is "{chain}:{on_chain_hash}". identity is "{chain}:pub:{pub}".
+payment_intents (
+  tx_hash TEXT PRIMARY KEY, identity, nonce, rail, sender, amount, sku_id,
+  status, created_at, updated_at )
+
 -- refund queue; PK is "{chain}:pub:{pub}", not the client tx.
 -- states pending→refunding→refunded/failed/processed
 pending_refunds (
@@ -130,8 +136,10 @@ stock_reservations ( key TEXT PRIMARY KEY, sku_id, expires_at, job_id, created_a
 - **Monitor cache is not the exactly-once gate.** `verify` only peeks. Cache
   eviction (`consume`) runs after a durable `mark_processed` or post-verify
   refund enqueue. Replay is `processed_txs`.
-- **JobStore is in-memory.** A crash between `mark_processed` and job completion loses the job and
-  does **not** enqueue a refund → silent loss. Durable job log is a v2 item.
+- **JobStore is in-memory.** `/result` after restart is gone. Money is not:
+  `payment_intents` is committed with the hash row. Stale `accepted` →
+  `force_refund` on startup (and a worker tick after `final_timeout`). Job
+  completion flips `fulfilled`; refund paths flip `refunded`.
 - **Claim is a bearer secret, not a wallet signature.** v2 splits the nonce (`pub` on-chain,
   `sec` only in the 402 JSON). `{tx, pub}` is not enough to claim. This proves the claimant
   saw the 402, not that they hold the paying key. `/result/{job_id}` is a capability URL.

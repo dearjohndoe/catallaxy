@@ -49,6 +49,7 @@ def create_runner(
     user_body: Any = None,
     free: bool = False,
     on_free_rollback: "Callable[[], Awaitable[None]] | None" = None,
+    on_intent: "Callable[[str], Awaitable[None]] | None" = None,
 ) -> Callable[[], Awaitable[dict[str, Any]]]:
     async def _free_rollback() -> None:
         if on_free_rollback is not None:
@@ -56,6 +57,14 @@ def create_runner(
                 await on_free_rollback()
             except Exception:
                 logger.exception("free-claim rollback failed")
+
+    async def _flip_intent(status: str) -> None:
+        if on_intent is None:
+            return
+        try:
+            await on_intent(status)
+        except Exception:
+            logger.exception("payment intent status=%s failed", status)
 
     async def runner() -> dict[str, Any]:
         try:
@@ -111,6 +120,7 @@ def create_runner(
                         refund_tx=refund_tx,
                         status="refunded" if refund_tx else "refund_pending",
                     )
+                await _flip_intent("refunded")
                 return {
                     "result": {
                         "status": "refunded" if refund_tx else "refund_pending",
@@ -121,6 +131,7 @@ def create_runner(
                 }
 
             validate_result_structure(raw)
+            await _flip_intent("fulfilled")
             if reservation_key:
                 try:
                     await stock.commit_sold(reservation_key, tx_hash)
@@ -169,6 +180,7 @@ def create_runner(
                     refund_tx=refund_tx,
                     status="refunded" if refund_tx else "refund_pending",
                 )
+            await _flip_intent("refunded")
             if refund_tx:
                 return {
                     "result": {

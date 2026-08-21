@@ -84,9 +84,10 @@ class SidecarApp:
                 tonapi_client=self.tonapi_client,
                 jetton_wallet_code_hex=settings.jetton_wallet_code_hex,
             )
-        # Refund queue lives in the same SQLite file as ProcessedTxStore — they
-        # already share per-agent scoping via tx_db_path and SQLite handles the
-        # two connections fine. One env var, one file to back up.
+        # Refund queue + payment_intents live in the same SQLite file as
+        # ProcessedTxStore. Intents are written on the tx_store connection
+        # (one txn with the hash row). Queue uses its own connection; SQLite
+        # WAL is fine. One env var, one file to back up.
         self.refund_queue = RefundQueue(settings.tx_db_path)
         # Per-IP FREE SKU usage accounting — same per-agent SQLite file.
         self.free_claims = FreeClaimStore(settings.tx_db_path)

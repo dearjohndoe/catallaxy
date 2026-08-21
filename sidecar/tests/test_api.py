@@ -22,7 +22,12 @@ from aiohttp.test_utils import TestClient, TestServer
 import api as api_module
 from api import QuoteEntry, SidecarApp, fetch_describe, validate_body
 from settings import AgentSku, DEFAULT_SKU_ID, Settings, SkuKind
-from payments import PaymentVerificationError, VerifiedPayment
+from payments import (
+    PaymentVerificationError,
+    VerifiedPayment,
+    INTENT_FULFILLED,
+    INTENT_REFUNDED,
+)
 
 # Well-formed split-nonce claim value for tests that POST /invoke with a
 # tx+nonce directly (skipping the real 402 round trip). Split-nonce claim
@@ -883,6 +888,67 @@ async def test_invoke_happy_path_runs_agent_and_returns_done(client, monkeypatch
     assert seen_env.get("CALLER_AMOUNT_NANO") == "5000000"
     assert seen_env.get("CALLER_TX_HASH") == "real-hash"
     assert seen_env.get("PAYMENT_RAIL") == "TON"
+
+
+async def test_invoke_writes_intent_and_marks_fulfilled(client, monkeypatch):
+    """Hash + intent land in one txn; success flips accepted → fulfilled."""
+    app: SidecarApp = client.sidecar
+    app.verifier.verify = AsyncMock(return_value=VerifiedPayment(
+        tx_hash="real-hash", sender="EQsender", recipient="EQagent",
+        amount=5_000_000, comment="n:sid-test",
+    ))
+    await _seed_claim_secret(app)
+
+    async def fake_run(**kwargs):
+        return {"result": {"type": "text", "data": "translated"}}
+
+    monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
+
+    resp = await client.post(
+        "/invoke",
+        json={
+            "capability": "translate",
+            "tx": "user-tx",
+            "nonce": VALID_NONCE,
+            "body": {"text": "hello"},
+        },
+    )
+    assert resp.status == 200
+    assert await app.tx_store.is_processed("ton:real-hash") is True
+    assert await app.tx_store.is_processed(f"ton:pub:{VALID_PUB}") is True
+    intent = await app.tx_store.get_intent("ton:real-hash")
+    assert intent is not None
+    assert intent.status == INTENT_FULFILLED
+    assert intent.identity == f"ton:pub:{VALID_PUB}"
+    assert intent.amount == 5_000_000
+
+
+async def test_invoke_marks_intent_refunded_on_agent_error(client, monkeypatch):
+    app: SidecarApp = client.sidecar
+    app.verifier.verify = AsyncMock(return_value=VerifiedPayment(
+        tx_hash="real-hash", sender="EQsender", recipient="EQagent",
+        amount=5_000_000, comment="n:sid-test",
+    ))
+    app.sender.send = AsyncMock(return_value="REFUND_HASH")
+    await _seed_claim_secret(app)
+
+    async def fake_run(**kwargs):
+        raise RuntimeError("agent died")
+
+    monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
+
+    resp = await client.post(
+        "/invoke",
+        json={
+            "capability": "translate",
+            "tx": "user-tx",
+            "nonce": VALID_NONCE,
+            "body": {"text": "hello"},
+        },
+    )
+    assert resp.status == 200
+    intent = await app.tx_store.get_intent("ton:real-hash")
+    assert intent is not None and intent.status == INTENT_REFUNDED
 
 
 async def test_invoke_agent_runtime_error_triggers_refund(client, monkeypatch):
