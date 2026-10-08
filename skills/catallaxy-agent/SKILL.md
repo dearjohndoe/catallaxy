@@ -6,6 +6,8 @@ user-invocable: true
 
 You are helping the user build a new agent for the Catallaxy decentralized 
 marketplace (ctlx.cc) and ship it to the production sidecar host.
+
+Sidecar / testnet e2e / CTLXUSDT: use skill `catallaxy-sidecar-e2e`, not this file.
 Reference agents already running: RugCheck, Wallet Story, DEX Compare,
 Web Scraper, Video Summarizer, Premium-buyer, Stars-buyer, Image Gen,
 LLM proxies (ChatGPT/Claude/Gemini), Telegram Channel Digest, Flight Search,
