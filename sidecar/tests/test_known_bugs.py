@@ -333,6 +333,7 @@ async def test_transfer_sender_no_reconnect_after_exhaustion(monkeypatch):
 
     wallet = MagicMock()
     wallet.transfer = AsyncMock(side_effect=ConnectionError("down"))
+    wallet.build_external_message = AsyncMock(side_effect=ConnectionError("down"))
     reconnect_calls = {"n": 0}
 
     async def fake_init(self):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Awaitable, Callable
 
 import json
@@ -9,8 +10,12 @@ import json
 from pytoniq_core import Cell, begin_cell
 from tonutils.clients import LiteBalancer
 from tonutils.contracts.wallet import WalletV4R2
+from tonutils.contracts.wallet.messages import TONTransferBuilder
+from tonutils.contracts.wallet.params import WalletV4Params
 from tonutils.types import NetworkGlobalID, PrivateKey
 from tonutils.utils import normalize_hash
+
+from chains.ton.broadcast import HttpBroadcaster
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +65,10 @@ SEND_RETRY_DELAYS = [0.5, 2, 5]  # seconds between retries
 SEND_TOTAL_BUDGET_SEC = 100  # mainnet liteserver indexing lag
 CONFIRM_TIMEOUT_SEC = 40  # mainnet: tx lands but liteserver get_transactions lags >10s
 CONFIRM_POLL_INTERVAL_SEC = 1
+# Explicit expiry for every message. tonutils defaults to 0xFFFFFFFF for
+# seqno == 0 (undeployed wallet), which makes every retry of the deploy
+# byte-identical — and duplicates are swallowed by liteserver/broadcast caches.
+MESSAGE_TTL_SEC = 60
 
 
 class TransferSender:
@@ -67,9 +76,11 @@ class TransferSender:
         self,
         private_key_hex: str,
         testnet: bool = False,
+        broadcaster: HttpBroadcaster | None = None,
     ) -> None:
         self._private_key_hex = private_key_hex
         self._network = NetworkGlobalID.TESTNET if testnet else NetworkGlobalID.MAINNET
+        self._broadcaster = broadcaster or HttpBroadcaster(testnet=testnet)
         self._client: LiteBalancer | None = None
         self._wallet: WalletV4R2 | None = None
         self._lock = asyncio.Lock()
@@ -115,6 +126,26 @@ class TransferSender:
                 return h
         return None
 
+    async def _submit(self, destination: str, amount: int, body: Cell) -> str:
+        """Sign a transfer and broadcast it over HTTP (toncenter → TonAPI).
+
+        The liteserver is used only for reading state (seqno) and confirmation;
+        its sendMessage is the last resort, when both HTTP providers fail.
+        """
+        assert self._client is not None and self._wallet is not None
+        ext = await self._wallet.build_external_message(
+            [TONTransferBuilder(destination=destination, amount=amount, body=body, bounce=False)],
+            WalletV4Params(valid_until=int(time.time()) + MESSAGE_TTL_SEC),
+        )
+        try:
+            via = await self._broadcaster.send_boc(bytes.fromhex(ext.as_hex))
+        except Exception as exc:
+            logger.warning("HTTP broadcast failed, falling back to liteserver: %s", exc)
+            await self._client.send_message(ext.as_hex)
+            via = "liteserver"
+        logger.info("Transfer broadcast via %s", via)
+        return ext.normalized_hash
+
     async def send(self, destination: str, amount: int, body: Cell) -> str:
         async with self._lock:
             loop = asyncio.get_event_loop()
@@ -138,13 +169,7 @@ class TransferSender:
                             )
                             return landed
 
-                    msg = await self._wallet.transfer(
-                        destination=destination,
-                        amount=amount,
-                        body=body,
-                        bounce=False,
-                    )
-                    tx_hash = msg.normalized_hash
+                    tx_hash = await self._submit(destination, amount, body)
                     submitted_hashes.add(tx_hash)
                     logger.info(
                         "Transfer submitted: hash=%s dest=%s amount=%d (awaiting confirmation)",
