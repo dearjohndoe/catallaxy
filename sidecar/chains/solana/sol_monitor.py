@@ -20,7 +20,7 @@ from chains.solana.constants import (
     MEMO_PROGRAM_V1,
     PAY_MEMO_PREFIX,
 )
-from chains.solana.rpc import SolanaRpc
+from chains.solana.rpc import SolanaRpc, SolanaRpcError
 
 logger = logging.getLogger("sidecar")
 
@@ -136,6 +136,10 @@ class SolanaPaymentMonitor:
     CACHE_TTL = 600     # seconds — same window as the TON monitor
     PAGE_LIMIT = 100
     MAX_PAGES = 5       # per poll; the claim's proof hint covers overflow
+    # Rows with no top-level memo are fetched to look for a CPI memo (Squads
+    # and other smart wallets: RPC's ``memo`` field shows top-level only).
+    # Capped so memo-less dust cannot turn one poll into an RPC flood.
+    MAX_TX_FETCHES = 20
 
     def __init__(
         self,
@@ -234,17 +238,46 @@ class SolanaPaymentMonitor:
         # Oldest first: the first tx carrying a memo owns that nonce. A later
         # copy of the (now public) memo — e.g. dust sent to hijack the claim —
         # must not displace the real payment, even inside one poll batch.
-        for row in reversed(fresh):
-            if row.get("err") is not None:
-                continue
-            nonce = extract_pay_nonce(row.get("memo"))
-            if nonce:
-                self._by_nonce.setdefault(nonce, (row["signature"], now))
+        # A memo-less row needs getTransaction (CPI memo). If that is capped or
+        # fails, stop there and park the watermark on the last row done: the
+        # next poll resumes at it, so nothing is skipped and order holds.
+        fetches = 0
+        last_done: str | None = None
+        try:
+            for row in reversed(fresh):
+                if row.get("err") is None:
+                    nonce = extract_pay_nonce(row.get("memo"))
+                    if nonce is None and row.get("memo") is None:
+                        if fetches >= self.MAX_TX_FETCHES:
+                            logger.info(
+                                "SolanaPaymentMonitor: fetch cap (%d) hit on %s; resuming next poll",
+                                self.MAX_TX_FETCHES, self._address,
+                            )
+                            newest = last_done or self._watermark
+                            break
+                        fetches += 1
+                        nonce = await self._cpi_nonce(row["signature"])
+                    if nonce:
+                        self._by_nonce.setdefault(nonce, (row["signature"], now))
+                last_done = row["signature"]
+        except Exception:
+            # Keep the progress made; the poll counts as failed (health stale).
+            if last_done is not None:
+                self._watermark = last_done
+            raise
         if newest is not None:
             self._watermark = newest
         for key in [k for k, (_, seen) in self._by_nonce.items() if seen < cutoff]:
             del self._by_nonce[key]
         self._last_ok_at = time.time()
+
+    async def _cpi_nonce(self, signature: str) -> str | None:
+        """CTLX:PAY nonce from a CPI memo. Raises when the tx can't be read yet
+        (RPC error / 429 / not visible) so the poll stops and retries it."""
+        tx = await self._rpc.get_transaction(signature, self._commitment)
+        if tx is None:
+            raise SolanaRpcError(f"getTransaction {signature} not visible yet")
+        return parse_sol_payment(tx, signature=signature, pay_to=self._address).nonce
 
     async def _loop(self) -> None:
         while not self._stop.is_set():

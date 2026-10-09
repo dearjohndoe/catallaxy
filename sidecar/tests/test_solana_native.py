@@ -130,11 +130,14 @@ class FakeRpc:
     def pay(
         self, *, source: str, dest: str, lamports: int, memo: str | None,
         err: Any = None, block_time: int | None = None, indexed: bool = True,
+        cpi_memo: str | None = None,
     ) -> str:
+        """``cpi_memo``: memo only inside a CPI — RPC's signature row shows none."""
         sig = _sig()
         tx = _parsed_tx(
             source=source, dest=dest, lamports=lamports, memo=memo,
             err=err, block_time=block_time,
+            inner=[_memo_ix(cpi_memo)] if cpi_memo else None,
         )
         self.txs[sig] = tx
         if indexed:
@@ -299,6 +302,62 @@ async def test_monitor_indexes_memo_and_reports_health():
     assert mon.is_healthy() is True
     mon.consume(PUB_NONCE)
     assert mon.get(PUB_NONCE) is None
+
+
+async def test_monitor_indexes_cpi_memo_by_fetching_memoless_rows():
+    """Squads: memo lives in a CPI, the signature row has memo=None."""
+    rpc = FakeRpc()
+    mon = SolanaPaymentMonitor(rpc, "S")  # type: ignore[arg-type]
+    sig = rpc.pay(source="vault", dest="S", lamports=5, memo=None, cpi_memo=pay_memo(PUB_NONCE))
+    top = rpc.pay(source="B", dest="S", lamports=5, memo=pay_memo(f"99999999:{SID}"))
+    await mon.poll()
+    assert mon.get(PUB_NONCE) == sig
+    assert rpc.tx_calls == [sig]  # rows with a top-level memo are not fetched
+    assert mon.get(f"99999999:{SID}") == top
+
+
+async def test_monitor_fetch_cap_resumes_next_poll_without_skipping():
+    rpc = FakeRpc()
+    mon = SolanaPaymentMonitor(rpc, "S")  # type: ignore[arg-type]
+    mon.MAX_TX_FETCHES = 2
+    sigs = [rpc.pay(source="v", dest="S", lamports=1, memo=None,
+                    cpi_memo=pay_memo(f"0000000{i}:{SID}")) for i in range(5)]
+    await mon.poll()
+    assert len(rpc.tx_calls) == 2 and mon.is_healthy()
+    assert [mon.get(f"0000000{i}:{SID}") for i in range(5)] == sigs[:2] + [None] * 3
+    await mon.poll()
+    await mon.poll()
+    assert [mon.get(f"0000000{i}:{SID}") for i in range(5)] == sigs
+    assert len(rpc.tx_calls) == 5  # each row fetched exactly once
+
+
+async def test_monitor_rpc_error_on_fetch_retries_and_keeps_order():
+    """429 on a CPI-memo row: poll fails (health not refreshed), progress up to
+    that row is kept, and the row is retried — never silently skipped. A later
+    dust copy of its memo cannot take the nonce meanwhile."""
+    rpc = FakeRpc()
+    mon = SolanaPaymentMonitor(rpc, "S")  # type: ignore[arg-type]
+    first = rpc.pay(source="B", dest="S", lamports=1, memo=pay_memo(f"11111111:{SID}"))
+    squads = rpc.pay(source="vault", dest="S", lamports=10, memo=None, cpi_memo=pay_memo(PUB_NONCE))
+    rpc.pay(source="attacker", dest="S", lamports=1, memo=pay_memo(PUB_NONCE))
+    real_get = rpc.get_transaction
+    calls = {"n": 0}
+
+    async def flaky(sig, commitment="confirmed"):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise SolanaRpcError("429")
+        return await real_get(sig, commitment)
+
+    rpc.get_transaction = flaky  # type: ignore[method-assign]
+    with pytest.raises(SolanaRpcError):
+        await mon.poll()
+    assert mon.is_healthy() is False
+    assert mon.get(f"11111111:{SID}") == first
+    assert mon.get(PUB_NONCE) is None
+    await mon.poll()
+    assert mon.get(PUB_NONCE) == squads
+    assert mon.is_healthy()
 
 
 async def test_monitor_skips_failed_txs():
