@@ -36,6 +36,9 @@ from tests.test_api import app_factory, _serve_app  # noqa: F401 (app_factory is
 
 
 SID = "sid-test"
+# Live cluster values (Oct 2026), below the old hardcoded fallbacks.
+LIVE_RENT_0 = 650_240
+LIVE_RENT_165 = 1_488_440
 PUB_NONCE = f"abcd1234:{SID}"
 
 
@@ -166,6 +169,9 @@ class FakeRpc:
 
     async def get_balance(self, pubkey, commitment="confirmed"):
         return self.balance
+
+    async def min_rent(self, data_len, *, fallback, ttl=3600.0):
+        return {0: LIVE_RENT_0, 165: LIVE_RENT_165}[data_len]
 
     async def get_latest_blockhash(self):
         return "11111111111111111111111111111111", 100
@@ -524,8 +530,11 @@ async def test_refund_skipped_below_rent_for_new_account():
     rpc = FakeRpc()
     rail = _rail(rpc, refund_fee_lamports=0)
     to = str(Keypair().pubkey())
-    assert await rail.refund(to, RENT_EXEMPT_MIN_LAMPORTS - 1, original_tx_hash="t", reason="r") is None
+    assert await rail.refund(to, LIVE_RENT_0 - 1, original_tx_hash="t", reason="r") is None
     assert rpc.sent == []
+    # Between the live rent and the stale 890_880 constant: must still refund.
+    assert await rail.refund(to, RENT_EXEMPT_MIN_LAMPORTS - 1, original_tx_hash="t", reason="r") is not None
+    rpc.sent.clear()
     # Existing account can receive any amount.
     rpc.accounts[to] = {"lamports": 1}
     assert await rail.refund(to, 1_000, original_tx_hash="t", reason="r") is not None
@@ -541,7 +550,7 @@ async def test_refund_send_failure_returns_none():
 async def test_check_refund_balance_keeps_seller_rent_exempt():
     rpc = FakeRpc()
     rail = _rail(rpc, refund_fee_lamports=5_000)
-    rpc.balance = 1_000_000 - 5_000 + 5_000 + RENT_EXEMPT_MIN_LAMPORTS
+    rpc.balance = 1_000_000 - 5_000 + 5_000 + LIVE_RENT_0
     assert (await rail.check_refund_balance(1_000_000))[0] is True
     rpc.balance -= 1
     ok, err = await rail.check_refund_balance(1_000_000)
@@ -564,6 +573,27 @@ async def test_recover_payment_from_monitor():
     rpc.pay(source="buyer", dest=str(rail.pay_to), lamports=77, memo=pay_memo(PUB_NONCE))
     assert await rail.recover_payment(PUB_NONCE) == ("buyer", 77)
     assert await rail.recover_payment(f"ffffffff:{SID}") is None
+
+
+async def test_min_rent_uses_rpc_caches_and_falls_back():
+    from chains.solana.rpc import SolanaRpc
+    rpc = SolanaRpc("http://unused")
+    calls = []
+
+    async def fake_call(method, params=None):
+        calls.append((method, params))
+        return 650_240
+
+    rpc.call = fake_call  # type: ignore[method-assign]
+    assert await rpc.min_rent(0, fallback=1) == 650_240
+    assert await rpc.min_rent(0, fallback=1) == 650_240
+    assert calls == [("getMinimumBalanceForRentExemption", [0])]
+
+    async def down(method, params=None):
+        raise SolanaRpcError("down")
+
+    rpc.call = down  # type: ignore[method-assign]
+    assert await rpc.min_rent(165, fallback=2_039_280) == 2_039_280
 
 
 async def test_close_stops_monitor_and_rpc():
@@ -831,11 +861,10 @@ def _with_token_balance(rpc: FakeRpc, amount: int | None) -> None:
 
 
 async def test_usdc_check_refund_balance():
-    from chains.solana.constants import TOKEN_ACCOUNT_RENT_LAMPORTS
     rpc = FakeRpc()
     rail = _usdc_rail(rpc)
     _with_token_balance(rpc, 1_000_000)
-    rpc.balance = 5_000 + TOKEN_ACCOUNT_RENT_LAMPORTS + RENT_EXEMPT_MIN_LAMPORTS
+    rpc.balance = 5_000 + LIVE_RENT_165 + LIVE_RENT_0
     assert await rail.check_refund_balance(1_000_000) == (True, "")
     ok, err = await rail.check_refund_balance(1_000_001)
     assert not ok and "USDC balance" in err

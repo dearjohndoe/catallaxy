@@ -35,9 +35,12 @@ MEMO_PROGRAM_V1 = Pubkey.from_string("Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMN
 PAY_MEMO_PREFIX = "CTLX:PAY:"
 REFUND_MEMO_PREFIX = "CTLX:REFUND:"
 # Rent-exempt minimum for a 0-data system account (lamports). A transfer that
-# leaves a new/drained account below this fails on-chain.
+# leaves a new/drained account below this fails on-chain. Fallback only: the
+# rails ask the RPC (rent was cut to 650_240 on devnet+mainnet in 2026, and the
+# old 890_880 made us skip refunds the chain would accept).
 RENT_EXEMPT_MIN_LAMPORTS = 890_880
 SIGNATURE_FEE_LAMPORTS = 5_000
 # Rent-exempt deposit for a 165-byte SPL token account (refund may create the
 # buyer's USDC ATA, paid by the seller).
-TOKEN_ACCOUNT_RENT_LAMPORTS = 2_039_280
+TOKEN_ACCOUNT_RENT_LAMPORTS = 2_039_280  # fallback; live value via RPC
+TOKEN_ACCOUNT_SIZE = 165

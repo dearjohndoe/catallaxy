@@ -20,6 +20,7 @@ class SolanaRpc:
         self._own_session = False
         self._timeout = timeout
         self.last_ok_at: float = 0.0
+        self._rent_cache: dict[int, tuple[int, float]] = {}
 
     async def close(self) -> None:
         if self._own_session and self._session is not None:
@@ -96,6 +97,25 @@ class SolanaRpc:
         if not isinstance(result, dict):
             return None
         return result.get("value")
+
+    async def min_rent(self, data_len: int, *, fallback: int, ttl: float = 3600.0) -> int:
+        """Rent-exempt minimum for ``data_len`` bytes, cached for ``ttl``.
+
+        Live value from the cluster (rent is a governed parameter and has
+        changed); ``fallback`` only when the RPC fails.
+        """
+        hit = self._rent_cache.get(data_len)
+        if hit and time.time() - hit[1] < ttl:
+            return hit[0]
+        try:
+            value = await self.call("getMinimumBalanceForRentExemption", [data_len])
+            if not isinstance(value, int) or value <= 0:
+                raise SolanaRpcError("bad rent value")
+        except Exception:
+            logger.warning("getMinimumBalanceForRentExemption(%s) failed; using %s", data_len, fallback)
+            return fallback
+        self._rent_cache[data_len] = (value, time.time())
+        return value
 
     async def get_balance(self, pubkey: str, commitment: str = "confirmed") -> int:
         result = await self.call("getBalance", [pubkey, {"commitment": commitment}])

@@ -163,7 +163,8 @@ class SolRail:
             )
             return None
         try:
-            if refund_amount < RENT_EXEMPT_MIN_LAMPORTS and await self._rpc.get_account_info(to) is None:
+            rent = await self._rpc.min_rent(0, fallback=RENT_EXEMPT_MIN_LAMPORTS)
+            if refund_amount < rent and await self._rpc.get_account_info(to) is None:
                 # Would create an account below rent-exempt: the runtime rejects it.
                 logger.warning(
                     "SOL refund skipped: %s lamports cannot fund new account %s tx=%s",
@@ -215,7 +216,8 @@ class SolRail:
     async def check_refund_balance(self, amount: int) -> tuple[bool, str]:
         """Seller must stay rent-exempt after sending ``amount - fee`` + tx fee."""
         balance = await self._rpc.get_balance(str(self.pay_to), self._commitment)
-        required = max(amount - self._refund_fee, 0) + SIGNATURE_FEE_LAMPORTS + RENT_EXEMPT_MIN_LAMPORTS
+        rent = await self._rpc.min_rent(0, fallback=RENT_EXEMPT_MIN_LAMPORTS)
+        required = max(amount - self._refund_fee, 0) + SIGNATURE_FEE_LAMPORTS + rent
         if balance < required:
             return False, f"SOL balance {balance} < required {required}"
         return True, ""

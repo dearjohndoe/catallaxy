@@ -23,6 +23,7 @@ from chains.solana.constants import (
     RENT_EXEMPT_MIN_LAMPORTS,
     SIGNATURE_FEE_LAMPORTS,
     TOKEN_ACCOUNT_RENT_LAMPORTS,
+    TOKEN_ACCOUNT_SIZE,
     TOKEN_PROGRAM,
     USDC_MINT_DEVNET,
     USDC_MINT_MAINNET,
@@ -140,7 +141,11 @@ class UsdcRail:
         if usdc is None or usdc < amount:
             return False, f"USDC balance {usdc or 0} < required {amount}"
         lamports = await self._rpc.get_balance(str(self.pay_to))
-        need = SIGNATURE_FEE_LAMPORTS + TOKEN_ACCOUNT_RENT_LAMPORTS + RENT_EXEMPT_MIN_LAMPORTS
+        need = (
+            SIGNATURE_FEE_LAMPORTS
+            + await self._rpc.min_rent(TOKEN_ACCOUNT_SIZE, fallback=TOKEN_ACCOUNT_RENT_LAMPORTS)
+            + await self._rpc.min_rent(0, fallback=RENT_EXEMPT_MIN_LAMPORTS)
+        )
         if lamports < need:
             return False, f"SOL balance {lamports} < required {need} for USDC refund fees"
         return True, ""
