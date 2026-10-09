@@ -46,42 +46,75 @@ def extract_pay_nonce(memo: Any) -> str | None:
 class SolPayment:
     signature: str
     sender: str          # source of the first transfer to us; "" if none
-    amount: int          # lamports summed over top-level transfers to us
+    amount: int          # lamports: seller balance delta inside this tx
     nonce: str | None    # pub_nonce from the CTLX:PAY memo
     block_time: int | None
     failed: bool         # meta.err set — tx landed but did not execute
 
 
+def _account_keys(message: dict[str, Any]) -> list[str]:
+    """jsonParsed ``accountKeys`` (incl. lookup-table loads) as base58 strings,
+    index-aligned with ``meta.preBalances`` / ``postBalances``."""
+    keys: list[str] = []
+    for k in message.get("accountKeys") or []:
+        keys.append(str(k.get("pubkey") if isinstance(k, dict) else k))
+    return keys
+
+
+def _all_instructions(tx: dict[str, Any], message: dict[str, Any]) -> list[dict[str, Any]]:
+    """Top-level instructions, then every CPI (``meta.innerInstructions``)."""
+    out = [ix for ix in message.get("instructions") or [] if isinstance(ix, dict)]
+    for group in (tx.get("meta") or {}).get("innerInstructions") or []:
+        out.extend(ix for ix in (group or {}).get("instructions") or [] if isinstance(ix, dict))
+    return out
+
+
 def parse_sol_payment(tx: dict[str, Any], *, signature: str, pay_to: str) -> SolPayment:
-    """Read a jsonParsed tx. Only top-level instructions count — a transfer or
-    memo inside a CPI is ignored (no wallet builds payments that way)."""
+    """Read a jsonParsed tx.
+
+    ``amount`` is the seller's balance delta inside this tx
+    (``postBalances - preBalances``), not a sum of parsed transfers: it also
+    counts SOL moved by CPI (smart wallets such as Squads) or by a program
+    debiting an account it owns, which leaves no transfer instruction at all.
+    The seller is a plain system account, so nothing in the tx can debit it
+    without our key — the delta is exactly what we received.
+
+    ``sender`` (refund target) is the source of the first transfer to us,
+    top-level or CPI; failing that, the account whose balance dropped most.
+    ``nonce`` comes from the first ``CTLX:PAY`` memo, top-level or CPI — one
+    tx pays for one purchase.
+    """
     meta = tx.get("meta") or {}
     message = ((tx.get("transaction") or {}).get("message")) or {}
-    amount = 0
+    keys = _account_keys(message)
+    pre = meta.get("preBalances") or []
+    post = meta.get("postBalances") or []
+
+    def delta(i: int) -> int:
+        try:
+            return int(post[i]) - int(pre[i])
+        except (IndexError, TypeError, ValueError):
+            return 0
+
+    amount = max(delta(keys.index(pay_to)), 0) if pay_to in keys else 0
+
     sender = ""
     nonce: str | None = None
-    for ix in message.get("instructions") or []:
-        if not isinstance(ix, dict):
-            continue
+    for ix in _all_instructions(tx, message):
         parsed = ix.get("parsed")
         if ix.get("programId") in _MEMO_PROGRAM_IDS or ix.get("program") == "spl-memo":
             if nonce is None:
                 nonce = extract_pay_nonce(parsed)
             continue
-        if ix.get("program") != "system" or not isinstance(parsed, dict):
-            continue
-        if parsed.get("type") != "transfer":
+        if sender or ix.get("program") != "system" or not isinstance(parsed, dict):
             continue
         info = parsed.get("info") or {}
-        if info.get("destination") != pay_to:
-            continue
-        try:
-            lamports = int(info.get("lamports") or 0)
-        except (TypeError, ValueError):
-            continue
-        amount += lamports
-        if not sender:
+        if parsed.get("type") in ("transfer", "transferWithSeed") and info.get("destination") == pay_to:
             sender = str(info.get("source") or "")
+    if not sender and amount > 0:
+        drops = [(delta(i), k) for i, k in enumerate(keys) if k != pay_to and delta(i) < 0]
+        if drops:
+            sender = min(drops)[1]
     return SolPayment(
         signature=signature,
         sender=sender,

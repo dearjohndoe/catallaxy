@@ -44,6 +44,20 @@ def _sig() -> str:
     return str(Keypair().sign_message(str(time.time_ns()).encode()))
 
 
+def _transfer_ix(source: str, dest: str, lamports: int) -> dict[str, Any]:
+    return {
+        "program": "system",
+        "programId": "11111111111111111111111111111111",
+        "parsed": {"type": "transfer", "info": {
+            "source": source, "destination": dest, "lamports": lamports,
+        }},
+    }
+
+
+def _memo_ix(memo: str) -> dict[str, Any]:
+    return {"program": "spl-memo", "programId": str(MEMO_PROGRAM), "parsed": memo}
+
+
 def _parsed_tx(
     *,
     source: str,
@@ -53,21 +67,45 @@ def _parsed_tx(
     block_time: int | None = None,
     err: Any = None,
     extra: list[dict[str, Any]] | None = None,
+    top_level_transfer: bool = True,
+    inner: list[dict[str, Any]] | None = None,
+    lamport_moves: dict[str, int] | None = None,
+    fee_payer: str | None = None,
 ) -> dict[str, Any]:
-    ixs: list[dict[str, Any]] = [{
-        "program": "system",
-        "programId": "11111111111111111111111111111111",
-        "parsed": {"type": "transfer", "info": {
-            "source": source, "destination": dest, "lamports": lamports,
-        }},
-    }]
+    """jsonParsed tx whose pre/postBalances follow from its system transfers
+    (top-level + ``inner`` CPIs) plus ``lamport_moves`` (direct mutation by an
+    owning program). Fee payer (default ``source``) pays 5000; a failed tx
+    only moves the fee."""
+    ixs: list[dict[str, Any]] = []
+    if top_level_transfer:
+        ixs.append(_transfer_ix(source, dest, lamports))
     if memo is not None:
-        ixs.append({"program": "spl-memo", "programId": str(MEMO_PROGRAM), "parsed": memo})
+        ixs.append(_memo_ix(memo))
     ixs.extend(extra or [])
+    payer = fee_payer or source
+    deltas: dict[str, int] = {payer: -5_000}
+    if err is None:
+        for ix in ixs + (inner or []):
+            parsed = ix.get("parsed")
+            if ix.get("program") == "system" and isinstance(parsed, dict):
+                info = parsed["info"]
+                deltas[info["source"]] = deltas.get(info["source"], 0) - info["lamports"]
+                deltas[info["destination"]] = deltas.get(info["destination"], 0) + info["lamports"]
+        for k, v in (lamport_moves or {}).items():
+            deltas[k] = deltas.get(k, 0) + v
+    keys = [payer] + [k for k in deltas if k != payer]
+    pre = [10**12] * len(keys)
+    post = [b + deltas[k] for b, k in zip(pre, keys)]
+    meta: dict[str, Any] = {"err": err, "preBalances": pre, "postBalances": post}
+    if inner:
+        meta["innerInstructions"] = [{"index": 0, "instructions": inner}]
     return {
         "blockTime": int(time.time()) if block_time is None else block_time,
-        "meta": {"err": err},
-        "transaction": {"message": {"instructions": ixs}},
+        "meta": meta,
+        "transaction": {"message": {
+            "accountKeys": [{"pubkey": k, "signer": k == payer, "writable": True} for k in keys],
+            "instructions": ixs,
+        }},
     }
 
 
@@ -192,12 +230,52 @@ def test_parse_sol_payment_sums_transfers_to_us_and_reads_memo():
     assert (p.amount, p.sender, p.nonce, p.failed) == (1000, buyer, PUB_NONCE, False)
 
 
+def test_parse_sol_payment_counts_cpi_transfer_from_smart_wallet():
+    """Squads-style: member signs, vault PDA pays via CPI — no top-level transfer."""
+    seller, member, vault = (str(Keypair().pubkey()) for _ in range(3))
+    tx = _parsed_tx(
+        source=member, dest=seller, lamports=0, memo=pay_memo(PUB_NONCE),
+        top_level_transfer=False, inner=[_transfer_ix(vault, seller, 2_000_000)],
+    )
+    p = parse_sol_payment(tx, signature="S", pay_to=seller)
+    assert (p.amount, p.sender, p.nonce) == (2_000_000, vault, PUB_NONCE)
+
+
+def test_parse_sol_payment_counts_direct_lamport_move_without_transfer_ix():
+    seller, payer, program_acct = (str(Keypair().pubkey()) for _ in range(3))
+    tx = _parsed_tx(
+        source=payer, dest=seller, lamports=0, memo=pay_memo(PUB_NONCE),
+        top_level_transfer=False,
+        lamport_moves={program_acct: -3_000_000, seller: 3_000_000},
+    )
+    p = parse_sol_payment(tx, signature="S", pay_to=seller)
+    assert (p.amount, p.sender) == (3_000_000, program_acct)
+
+
+def test_parse_sol_payment_reads_memo_from_cpi():
+    seller, buyer = str(Keypair().pubkey()), str(Keypair().pubkey())
+    tx = _parsed_tx(source=buyer, dest=seller, lamports=10, memo=None,
+                    inner=[_memo_ix(pay_memo(PUB_NONCE))])
+    assert parse_sol_payment(tx, signature="S", pay_to=seller).nonce == PUB_NONCE
+
+
+def test_parse_sol_payment_one_tx_pays_one_purchase():
+    """Two CTLX:PAY memos, one transfer: the whole delta goes to the first memo
+    only — the second purchase never sees a payment (no double credit)."""
+    seller, buyer = str(Keypair().pubkey()), str(Keypair().pubkey())
+    other = f"99999999:{SID}"
+    tx = _parsed_tx(source=buyer, dest=seller, lamports=10, memo=pay_memo(PUB_NONCE),
+                    extra=[_memo_ix(pay_memo(other))])
+    p = parse_sol_payment(tx, signature="S", pay_to=seller)
+    assert (p.nonce, p.amount) == (PUB_NONCE, 10)
+
+
 def test_parse_sol_payment_flags_failed_tx():
     seller, buyer = str(Keypair().pubkey()), str(Keypair().pubkey())
     tx = _parsed_tx(source=buyer, dest=seller, lamports=5, memo=None,
                     err={"InstructionError": [0, "Custom"]})
     p = parse_sol_payment(tx, signature="S", pay_to=seller)
-    assert p.failed and p.nonce is None
+    assert p.failed and p.nonce is None and p.amount == 0
 
 
 # ── monitor ─────────────────────────────────────────────────────────────
