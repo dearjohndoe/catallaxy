@@ -79,6 +79,20 @@ def sender() -> TransferSender:
     return TransferSender(private_key_hex="a" * 64, testnet=True)
 
 
+@pytest.fixture(autouse=True)
+def _submit_via_wallet_mock(request, monkeypatch):
+    """Retry-logic tests below drive `send()` through a mocked `wallet.transfer`;
+    route `_submit` through it. `_submit` itself is tested separately."""
+    if request.node.get_closest_marker("real_submit"):
+        return
+
+    async def fake_submit(self, destination, amount, body):
+        msg = await self._wallet.transfer(destination=destination, amount=amount, body=body, bounce=False)
+        return msg.normalized_hash
+
+    monkeypatch.setattr(TransferSender, "_submit", fake_submit)
+
+
 async def test_sender_send_success_first_attempt(sender, monkeypatch):
     wallet = MagicMock()
     msg = MagicMock()
@@ -212,3 +226,51 @@ async def test_sender_close_cleans_client(sender):
     await sender.close()
     assert sender._client is None
     assert sender._wallet is None
+
+
+# ── _submit: HTTP broadcast first, liteserver last ──────────────────────
+
+def _submit_sender(broadcaster) -> TransferSender:
+    s = TransferSender(private_key_hex="a" * 64, testnet=True, broadcaster=broadcaster)
+    ext = MagicMock()
+    ext.as_hex = "b5ee"
+    ext.normalized_hash = "HASH_EXT"
+    s._wallet = MagicMock()
+    s._wallet.build_external_message = AsyncMock(return_value=ext)
+    s._client = MagicMock()
+    s._client.send_message = AsyncMock()
+    return s
+
+
+@pytest.mark.real_submit
+async def test_submit_broadcasts_over_http_not_liteserver():
+    broadcaster = MagicMock()
+    broadcaster.send_boc = AsyncMock(return_value="toncenter")
+    s = _submit_sender(broadcaster)
+
+    assert await s._submit("EQdest", 1_000, MagicMock()) == "HASH_EXT"
+    broadcaster.send_boc.assert_awaited_once_with(bytes.fromhex("b5ee"))
+    s._client.send_message.assert_not_awaited()
+
+
+@pytest.mark.real_submit
+async def test_submit_falls_back_to_liteserver_when_http_fails():
+    broadcaster = MagicMock()
+    broadcaster.send_boc = AsyncMock(side_effect=RuntimeError("both down"))
+    s = _submit_sender(broadcaster)
+
+    assert await s._submit("EQdest", 1_000, MagicMock()) == "HASH_EXT"
+    s._client.send_message.assert_awaited_once_with("b5ee")
+
+
+@pytest.mark.real_submit
+async def test_submit_sets_finite_valid_until(monkeypatch):
+    """seqno == 0 must not get tonutils' 0xFFFFFFFF — retries would be identical."""
+    broadcaster = MagicMock()
+    broadcaster.send_boc = AsyncMock(return_value="toncenter")
+    s = _submit_sender(broadcaster)
+    monkeypatch.setattr(transfer_module.time, "time", lambda: 1_000_000)
+
+    await s._submit("EQdest", 1_000, MagicMock())
+    params = s._wallet.build_external_message.await_args.args[1]
+    assert params.valid_until == 1_000_000 + transfer_module.MESSAGE_TTL_SEC

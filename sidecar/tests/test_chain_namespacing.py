@@ -6,7 +6,8 @@ from __future__ import annotations
 import aiosqlite
 import pytest
 
-from chains.base import chain_for_rail, namespaced_tx_key
+from chains.base import chain_for_rail, namespaced_pub_key, namespaced_tx_key
+from payments.nonce import pub_from_nonce
 from payments.processed_tx import ProcessedTxStore
 from payments.refund_queue import RefundQueue
 
@@ -31,6 +32,25 @@ def test_namespaced_tx_key_is_idempotent_on_already_namespaced():
     # A value already containing ':' is returned unchanged (safe double-wrap).
     assert namespaced_tx_key("ton", "ton:abc123") == "ton:abc123"
     assert namespaced_tx_key("sol", "ton:abc123") == "ton:abc123"
+
+
+def test_namespaced_pub_key_distinct_from_tx_key():
+    assert namespaced_pub_key("ton", "aabbccdd") == "ton:pub:aabbccdd"
+    # An 8-hex client tx must not collide with the pub identity.
+    assert namespaced_tx_key("ton", "aabbccdd") != namespaced_pub_key("ton", "aabbccdd")
+
+
+def test_namespaced_pub_key_is_idempotent():
+    assert namespaced_pub_key("ton", "ton:pub:aabbccdd") == "ton:pub:aabbccdd"
+    assert namespaced_pub_key("sol", "ton:pub:aabbccdd") == "ton:pub:aabbccdd"
+
+
+def test_pub_from_nonce_full_and_pub_nonce():
+    assert pub_from_nonce("aabbccdd11223344:sid") == "aabbccdd"
+    assert pub_from_nonce("aabbccdd:sid") == "aabbccdd"
+    assert pub_from_nonce("n") is None
+    assert pub_from_nonce("short:sid") is None
+    assert pub_from_nonce("") is None
 
 
 # ── ProcessedTxStore migration ─────────────────────────────────────────

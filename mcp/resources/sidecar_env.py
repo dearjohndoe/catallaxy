@@ -60,7 +60,7 @@ them, no effect. Cross-agent DB isolation comes from distinct `AGENT_NAME`s.
 | REFUND_FEE_NANOTON | 500000 | Refund gas (alias TON_REFUND_FEE_NANOTON) |
 | REFUND_WORKER_INTERVAL_SECONDS | 60 | Refund retry-worker interval |
 | REFUND_MAX_ATTEMPTS | 10 | Max refund retry attempts |
-| RATE_LIMIT_REQUESTS | 60 | Requests allowed per window |
+| RATE_LIMIT_REQUESTS | 120 | Requests allowed per window |
 | RATE_LIMIT_WINDOW_SECONDS | 60 | Rate-limit window |
 | FREE_CLAIM_LIMIT | 1 | Max free-SKU claims per client IP per window |
 | FREE_CLAIM_WINDOW_SECONDS | 2592000 | Free-claim window (30 days) |

@@ -80,7 +80,7 @@ def _parse_tx(tx: dict[str, Any]) -> AgentInfo | None:
             name=payload.get("name", ""),
             description=payload.get("description", ""),
             capability=capability,
-            price=int(payload.get("price", 0)),
+            price=int(payload.get("price") or payload.get("price_hint") or 0),
             actual_price=0,
             endpoint=payload["endpoint"],
             address=msg.get("source", ""),
@@ -152,8 +152,43 @@ async def _fetch_agents_from_chain(
     return _dedupe(agents)
 
 
+async def _hydrate_from_info(session: aiohttp.ClientSession, agent: AgentInfo) -> None:
+    """Fill fat fields that the v2 thin heartbeat no longer carries."""
+    try:
+        async with session.get(
+            f"{agent.endpoint}/info",
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            if resp.status != 200:
+                return
+            data = await resp.json()
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+    if data.get("description"):
+        agent.description = str(data["description"])
+    if data.get("name"):
+        agent.name = str(data["name"])
+    if isinstance(data.get("args_schema"), dict):
+        agent.args_schema = data["args_schema"]
+    if isinstance(data.get("result_schema"), dict):
+        agent.result_schema = data["result_schema"]
+    caps = data.get("capabilities")
+    if isinstance(caps, list) and caps:
+        agent.capabilities = tuple(str(c) for c in caps if c)
+        agent.capability = agent.capabilities[0] if agent.capabilities else agent.capability
+    if data.get("preview_url"):
+        agent.preview_url = str(data["preview_url"])
+    if data.get("avatar_url"):
+        agent.avatar_url = str(data["avatar_url"])
+    images = data.get("images")
+    if isinstance(images, list):
+        agent.images = tuple(str(u) for u in images if u)
+
+
 async def _ping_agent(session: aiohttp.ClientSession, agent: AgentInfo) -> AgentInfo:
-    """Send a dummy invoke to get 402 — confirms agent is alive and gets actual price."""
+    """Confirm liveness via 402, then hydrate schemas/media from GET /info."""
     try:
         async with session.post(
             f"{agent.endpoint}/invoke",
@@ -171,6 +206,8 @@ async def _ping_agent(session: aiohttp.ClientSession, agent: AgentInfo) -> Agent
                 agent.alive = True
     except Exception:
         logger.debug("Ping failed for %s (%s)", agent.name, agent.endpoint)
+    if agent.alive:
+        await _hydrate_from_info(session, agent)
     return agent
 
 

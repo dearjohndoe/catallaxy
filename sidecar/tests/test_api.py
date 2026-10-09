@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 from contextlib import asynccontextmanager
 import json
@@ -21,7 +22,32 @@ from aiohttp.test_utils import TestClient, TestServer
 import api as api_module
 from api import QuoteEntry, SidecarApp, fetch_describe, validate_body
 from settings import AgentSku, DEFAULT_SKU_ID, Settings, SkuKind
-from payments import PaymentVerificationError, VerifiedPayment
+from payments import (
+    PaymentVerificationError,
+    VerifiedPayment,
+    INTENT_FULFILLED,
+    INTENT_REFUNDED,
+)
+
+# Well-formed split-nonce claim value for tests that POST /invoke with a
+# tx+nonce directly (skipping the real 402 round trip). Split-nonce claim
+# auth (TODO-claim-auth.md) requires exactly 16 hex chars before the
+# ":sidecar_id" suffix — pub(8) + sec(8).
+VALID_PUB = "11111111"
+VALID_SEC = "22222222"
+VALID_NONCE = f"{VALID_PUB}{VALID_SEC}:sid-test"
+
+
+async def _seed_claim_secret(
+    app: SidecarApp, pub: str = VALID_PUB, sec: str = VALID_SEC, ttl: int = 3600,
+) -> None:
+    """Register a claim secret the way ``build_402_response`` would at mint
+    time. Needed by any test that posts a ``tx``+``nonce`` claim directly —
+    otherwise the new claim-secret check (TODO-claim-auth.md) 403s before
+    ever reaching a mocked verifier."""
+    await app.claim_secrets.insert(
+        pub, hashlib.sha256(sec.encode()).hexdigest(), int(time.time()) + ttl,
+    )
 
 
 # ── Settings factory ───────────────────────────────────────────────────
@@ -80,6 +106,8 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
         payment_rails=tuple(rails),
         tg_bot_token=None,
         tg_user_ids=(),
+        usdt_master=USDT_MASTER_TESTNET,
+        jetton_wallet_code_hex=None,
     )
     base.update(overrides)
     return Settings(**base)
@@ -97,6 +125,7 @@ async def _close_app_stores(app: SidecarApp) -> None:
     await app.tx_store.close()
     await app.refund_queue.close()
     await app.free_claims.close()
+    await app.claim_secrets.close()
 
 
 @pytest.fixture
@@ -501,6 +530,145 @@ async def test_invoke_preflight_returns_402_with_payment_info(client):
     assert data["payment_request"]["amount"] == "1000000"
 
 
+async def test_invoke_preflight_memo_vs_claim_nonce_split(client):
+    """Wire contract (TODO-claim-auth.md, PROTOCOL.md §5): `memo` carries only
+    the public correlator (`pub:sidecar_id`, 8 hex + suffix), while the new
+    `payment_options[].nonce` field carries the full claim value
+    (`pub+sec:sidecar_id`, 16 hex + suffix) — never on-chain, JSON body only.
+    The `x-ton-pay-nonce` header stays in sync with `memo`, not the claim
+    value, since a header-only client never sees `sec`."""
+    resp = await client.post("/invoke", json={"capability": "translate"})
+    assert resp.status == 402
+    data = await resp.json()
+    opt = data["payment_options"][0]
+    memo = opt["memo"]
+    claim_nonce = opt["nonce"]
+    assert memo.endswith(":sid-test")
+    assert claim_nonce.endswith(":sid-test")
+    memo_hex = memo.split(":", 1)[0]
+    claim_hex = claim_nonce.split(":", 1)[0]
+    assert len(memo_hex) == 8
+    assert len(claim_hex) == 16
+    assert claim_hex.startswith(memo_hex)
+    assert claim_nonce != memo
+    assert resp.headers["x-ton-pay-nonce"] == memo
+
+
+async def test_invoke_accepts_proof_field_as_tx_alias(client, monkeypatch):
+    """CTLX/2 generic proof: ``proof`` is canonical, ``tx`` is the TON alias."""
+    app: SidecarApp = client.sidecar
+    app.tx_store.is_processed = AsyncMock(return_value=False)
+    app.tx_store.mark_processed = AsyncMock()
+    app.verifier.verify = AsyncMock(return_value=VerifiedPayment(
+        tx_hash="real-hash", sender="EQsender", recipient="EQagent",
+        amount=5_000_000, comment="n:sid-test",
+    ))
+    await _seed_claim_secret(app)
+
+    async def fake_run(**kwargs):
+        return {"result": {"type": "text", "data": "ok"}}
+
+    monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
+
+    resp = await client.post(
+        "/invoke",
+        json={
+            "capability": "translate",
+            "proof": "canonical-proof",
+            "nonce": VALID_NONCE,
+            "body": {"text": "hello"},
+        },
+    )
+    assert resp.status == 200
+    app.verifier.verify.assert_awaited()
+
+
+async def test_invoke_proof_wins_over_tx_when_both_present(client, monkeypatch):
+    app: SidecarApp = client.sidecar
+    app.tx_store.is_processed = AsyncMock(return_value=False)
+    app.tx_store.mark_processed = AsyncMock()
+    app.verifier.verify = AsyncMock(return_value=VerifiedPayment(
+        tx_hash="real-hash", sender="EQsender", recipient="EQagent",
+        amount=5_000_000, comment="n:sid-test",
+    ))
+    await _seed_claim_secret(app)
+
+    async def fake_run(**kwargs):
+        return {"result": {"type": "text", "data": "ok"}}
+
+    monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
+
+    resp = await client.post(
+        "/invoke",
+        json={
+            "capability": "translate",
+            "proof": "canonical-proof",
+            "tx": "legacy-tx",
+            "nonce": VALID_NONCE,
+            "body": {"text": "hello"},
+        },
+    )
+    assert resp.status == 200
+    # Storage identity is pub, not either client proof field.
+    first_key = app.tx_store.is_processed.await_args_list[0].args[0]
+    assert first_key == f"ton:pub:{VALID_PUB}"
+    # Wire: ``proof`` still wins over ``tx`` as the value passed to verify.
+    assert app.verifier.verify.await_args.kwargs["tx_hash"] == "canonical-proof"
+
+
+async def test_invoke_consumes_monitor_only_after_mark_processed(client, monkeypatch):
+    """verify peeks; cache eviction runs after the durable processed_txs write."""
+    app: SidecarApp = client.sidecar
+    app.tx_store.is_processed = AsyncMock(return_value=False)
+    app.tx_store.mark_processed = AsyncMock()
+    app.verifier.verify = AsyncMock(return_value=VerifiedPayment(
+        tx_hash="real-hash", sender="EQsender", recipient="EQagent",
+        amount=5_000_000, comment=f"{VALID_PUB}:sid-test",
+    ))
+    app.verifier.consume = AsyncMock()
+    await _seed_claim_secret(app)
+
+    async def fake_run(**kwargs):
+        return {"result": {"type": "text", "data": "ok"}}
+
+    monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
+
+    resp = await client.post(
+        "/invoke",
+        json={
+            "capability": "translate",
+            "tx": "client-tx",
+            "nonce": VALID_NONCE,
+            "body": {"text": "hello"},
+        },
+    )
+    assert resp.status == 200
+    assert app.tx_store.mark_processed.await_count >= 1
+    app.verifier.consume.assert_awaited_once_with(f"{VALID_PUB}:sid-test")
+
+
+async def test_invoke_does_not_consume_on_verify_reject(client):
+    app: SidecarApp = client.sidecar
+    app.tx_store.is_processed = AsyncMock(return_value=False)
+    app.verifier.verify = AsyncMock(
+        side_effect=PaymentVerificationError("Transaction not found"),
+    )
+    app.verifier.consume = AsyncMock()
+    await _seed_claim_secret(app)
+
+    resp = await client.post(
+        "/invoke",
+        json={
+            "capability": "translate",
+            "tx": "missing",
+            "nonce": VALID_NONCE,
+            "body": {"text": "hello"},
+        },
+    )
+    assert resp.status == 402
+    app.verifier.consume.assert_not_awaited()
+
+
 async def test_invoke_preflight_returns_503_when_monitor_unhealthy(client):
     """Plan D: refuse preflight when the TON monitor has no fresh poll."""
     client.sidecar.verifier.is_healthy = lambda max_age_seconds=60.0: False  # type: ignore[method-assign]
@@ -512,14 +680,19 @@ async def test_invoke_preflight_returns_503_when_monitor_unhealthy(client):
     assert "TON" in data["detail"]
 
 
-async def test_invoke_preflight_preserves_valid_nonce(client):
+async def test_invoke_preflight_always_mints_server_side_nonce(client):
+    """Split-nonce claim auth (TODO-claim-auth.md): the server always mints
+    pub+sec itself at 402 time and never echoes a client-supplied nonce, even
+    one that already carries the right sidecar suffix — otherwise a client
+    could choose (and thus predict) its own claim secret."""
     client_nonce = "userchosen:sid-test"
     resp = await client.post(
         "/invoke",
         json={"capability": "translate", "nonce": client_nonce},
     )
     assert resp.status == 402
-    assert resp.headers["x-ton-pay-nonce"] == client_nonce
+    assert resp.headers["x-ton-pay-nonce"] != client_nonce
+    assert resp.headers["x-ton-pay-nonce"].endswith(":sid-test")
 
 
 async def test_invoke_preflight_rewrites_bad_nonce(client):
@@ -585,7 +758,7 @@ async def test_invoke_already_processed_tx_returns_409(client):
         json={
             "capability": "translate",
             "tx": "dup-tx",
-            "nonce": "n:sid-test",
+            "nonce": VALID_NONCE,
             "body": {"text": "hi"},
         },
     )
@@ -596,12 +769,13 @@ async def test_invoke_payment_verification_error_returns_402(client):
     app: SidecarApp = client.sidecar
     app.tx_store.is_processed = AsyncMock(return_value=False)
     app.verifier.verify = AsyncMock(side_effect=PaymentVerificationError("bad"))
+    await _seed_claim_secret(app)
     resp = await client.post(
         "/invoke",
         json={
             "capability": "translate",
             "tx": "txh",
-            "nonce": "n:sid-test",
+            "nonce": VALID_NONCE,
             "body": {"text": "hi"},
         },
     )
@@ -619,22 +793,58 @@ async def test_invoke_payment_verification_unexpected_enqueues_refund(client):
     try:
         app.tx_store.is_processed = AsyncMock(return_value=False)
         app.verifier.verify = AsyncMock(side_effect=RuntimeError("rpc down"))
+        app.verifier.consume = AsyncMock()
+        await _seed_claim_secret(app)
         resp = await client.post(
             "/invoke",
             json={
                 "capability": "translate",
                 "tx": "txh",
-                "nonce": "n:sid-test",
+                "nonce": VALID_NONCE,
                 "body": {"text": "hi"},
             },
         )
         assert resp.status == 503
         data = await resp.json()
         assert data["refund_pending"] is True
-        entry = await app.refund_queue.get("ton:txh")
+        entry = await app.refund_queue.get(f"ton:pub:{VALID_PUB}")
         assert entry is not None
         assert entry.status == "pending"
         assert entry.force_refund == 0  # pre-verify, not a force case
+        assert await app.refund_queue.get("ton:txh") is None
+        # Worker recovers sender/amount from the monitor cache — do not evict.
+        app.verifier.consume.assert_not_awaited()
+    finally:
+        await app.refund_queue.close()
+
+
+async def test_invoke_consumes_after_post_verify_refund(client):
+    """After verify succeeded, a failed mark still evicts — sender/amount are
+    already on the queue row, the worker does not need the cache."""
+    app: SidecarApp = client.sidecar
+    await app.refund_queue.init()
+    try:
+        app.tx_store.is_processed = AsyncMock(return_value=False)
+        app.tx_store.mark_processed = AsyncMock(side_effect=RuntimeError("disk full"))
+        app.verifier.verify = AsyncMock(return_value=VerifiedPayment(
+            tx_hash="real-hash", sender="EQsender", recipient="EQagent",
+            amount=5_000_000, comment=f"{VALID_PUB}:sid-test",
+        ))
+        app.verifier.consume = AsyncMock()
+        await _seed_claim_secret(app)
+        resp = await client.post(
+            "/invoke",
+            json={
+                "capability": "translate",
+                "tx": "user-tx",
+                "nonce": VALID_NONCE,
+                "body": {"text": "hi"},
+            },
+        )
+        assert resp.status == 503
+        app.verifier.consume.assert_awaited_once_with(f"{VALID_PUB}:sid-test")
+        entry = await app.refund_queue.get(f"ton:pub:{VALID_PUB}")
+        assert entry is not None and entry.sender == "EQsender"
     finally:
         await app.refund_queue.close()
 
@@ -647,6 +857,7 @@ async def test_invoke_happy_path_runs_agent_and_returns_done(client, monkeypatch
         tx_hash="real-hash", sender="EQsender", recipient="EQagent",
         amount=5_000_000, comment="n:sid-test",
     ))
+    await _seed_claim_secret(app)
 
     seen_env = {}
 
@@ -661,7 +872,7 @@ async def test_invoke_happy_path_runs_agent_and_returns_done(client, monkeypatch
         json={
             "capability": "translate",
             "tx": "user-tx",
-            "nonce": "n:sid-test",
+            "nonce": VALID_NONCE,
             "body": {"text": "hello"},
         },
     )
@@ -669,21 +880,57 @@ async def test_invoke_happy_path_runs_agent_and_returns_done(client, monkeypatch
     data = await resp.json()
     assert data["status"] == "done"
     assert data["result"] == {"type": "text", "data": "translated"}
-    # The mark was against the real on-chain hash, not the user-supplied one.
-    app.tx_store.mark_processed.assert_awaited_once_with("ton:real-hash")
+    # The mark was against the real on-chain hash, not the user-supplied one;
+    # pub identity is also recorded so retries/refund-worker key the same way.
+    marked = [c.args[0] for c in app.tx_store.mark_processed.await_args_list]
+    assert "ton:real-hash" in marked
+    assert f"ton:pub:{VALID_PUB}" in marked
     assert seen_env.get("CALLER_AMOUNT_NANO") == "5000000"
+    assert seen_env.get("CALLER_TX_HASH") == "real-hash"
     assert seen_env.get("PAYMENT_RAIL") == "TON"
 
 
-async def test_invoke_agent_runtime_error_triggers_refund(client, monkeypatch):
+async def test_invoke_writes_intent_and_marks_fulfilled(client, monkeypatch):
+    """Hash + intent land in one txn; success flips accepted → fulfilled."""
     app: SidecarApp = client.sidecar
-    app.tx_store.is_processed = AsyncMock(return_value=False)
-    app.tx_store.mark_processed = AsyncMock()
+    app.verifier.verify = AsyncMock(return_value=VerifiedPayment(
+        tx_hash="real-hash", sender="EQsender", recipient="EQagent",
+        amount=5_000_000, comment="n:sid-test",
+    ))
+    await _seed_claim_secret(app)
+
+    async def fake_run(**kwargs):
+        return {"result": {"type": "text", "data": "translated"}}
+
+    monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
+
+    resp = await client.post(
+        "/invoke",
+        json={
+            "capability": "translate",
+            "tx": "user-tx",
+            "nonce": VALID_NONCE,
+            "body": {"text": "hello"},
+        },
+    )
+    assert resp.status == 200
+    assert await app.tx_store.is_processed("ton:real-hash") is True
+    assert await app.tx_store.is_processed(f"ton:pub:{VALID_PUB}") is True
+    intent = await app.tx_store.get_intent("ton:real-hash")
+    assert intent is not None
+    assert intent.status == INTENT_FULFILLED
+    assert intent.identity == f"ton:pub:{VALID_PUB}"
+    assert intent.amount == 5_000_000
+
+
+async def test_invoke_marks_intent_refunded_on_agent_error(client, monkeypatch):
+    app: SidecarApp = client.sidecar
     app.verifier.verify = AsyncMock(return_value=VerifiedPayment(
         tx_hash="real-hash", sender="EQsender", recipient="EQagent",
         amount=5_000_000, comment="n:sid-test",
     ))
     app.sender.send = AsyncMock(return_value="REFUND_HASH")
+    await _seed_claim_secret(app)
 
     async def fake_run(**kwargs):
         raise RuntimeError("agent died")
@@ -695,7 +942,37 @@ async def test_invoke_agent_runtime_error_triggers_refund(client, monkeypatch):
         json={
             "capability": "translate",
             "tx": "user-tx",
-            "nonce": "n:sid-test",
+            "nonce": VALID_NONCE,
+            "body": {"text": "hello"},
+        },
+    )
+    assert resp.status == 200
+    intent = await app.tx_store.get_intent("ton:real-hash")
+    assert intent is not None and intent.status == INTENT_REFUNDED
+
+
+async def test_invoke_agent_runtime_error_triggers_refund(client, monkeypatch):
+    app: SidecarApp = client.sidecar
+    app.tx_store.is_processed = AsyncMock(return_value=False)
+    app.tx_store.mark_processed = AsyncMock()
+    app.verifier.verify = AsyncMock(return_value=VerifiedPayment(
+        tx_hash="real-hash", sender="EQsender", recipient="EQagent",
+        amount=5_000_000, comment="n:sid-test",
+    ))
+    app.sender.send = AsyncMock(return_value="REFUND_HASH")
+    await _seed_claim_secret(app)
+
+    async def fake_run(**kwargs):
+        raise RuntimeError("agent died")
+
+    monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
+
+    resp = await client.post(
+        "/invoke",
+        json={
+            "capability": "translate",
+            "tx": "user-tx",
+            "nonce": VALID_NONCE,
             "body": {"text": "hello"},
         },
     )
@@ -933,6 +1210,7 @@ async def test_invoke_multipart_with_file_upload_happy_path(client, monkeypatch)
         tx_hash="real", sender="EQsender", recipient="EQagent",
         amount=5_000_000, comment="n:sid-test",
     ))
+    await _seed_claim_secret(app)
 
     captured_payload: dict[str, Any] = {}
 
@@ -945,7 +1223,7 @@ async def test_invoke_multipart_with_file_upload_happy_path(client, monkeypatch)
     form = FormData()
     form.add_field("capability", "translate")
     form.add_field("tx", "user-tx")
-    form.add_field("nonce", "n:sid-test")
+    form.add_field("nonce", VALID_NONCE)
     form.add_field("body_json", json.dumps({"text": "hi"}))
     form.add_field("file:image", io.BytesIO(b"FAKE PNG"), filename="pic.png", content_type="image/png")
 
@@ -1004,6 +1282,7 @@ async def test_invoke_with_tracked_stock_reserves_and_commits_on_success(app_fac
             tx_hash="real-hash", sender="EQsender", recipient="EQagent",
             amount=1_000_000, comment="n:sid-test",
         ))
+        await _seed_claim_secret(app)
 
         async def fake_run(**kwargs):
             return {"result": {"type": "text", "data": "ok"}}
@@ -1011,7 +1290,7 @@ async def test_invoke_with_tracked_stock_reserves_and_commits_on_success(app_fac
         monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
 
         resp = await c.post("/invoke", json={
-            "capability": "translate", "tx": "u", "nonce": "n:sid-test",
+            "capability": "translate", "tx": "u", "nonce": VALID_NONCE,
             "body": {"text": "hi"},
         })
         assert resp.status == 200
@@ -1031,6 +1310,7 @@ async def test_invoke_out_of_stock_from_agent_refunds_and_reports(app_factory, t
             amount=1_000_000, comment="n:sid-test",
         ))
         app.sender.send = AsyncMock(return_value="REFUND_HASH")
+        await _seed_claim_secret(app)
 
         async def fake_run(**kwargs):
             return {"error": "out_of_stock", "reason": "banned before delivery"}
@@ -1038,7 +1318,7 @@ async def test_invoke_out_of_stock_from_agent_refunds_and_reports(app_factory, t
         monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
 
         resp = await c.post("/invoke", json={
-            "capability": "translate", "tx": "u", "nonce": "n:sid-test",
+            "capability": "translate", "tx": "u", "nonce": VALID_NONCE,
             "body": {"text": "hi"},
         })
         assert resp.status == 200
@@ -1065,6 +1345,7 @@ async def test_invoke_agent_failure_releases_reservation(app_factory, tmp_path, 
             amount=1_000_000, comment="n:sid-test",
         ))
         app.sender.send = AsyncMock(return_value="REFUND_HASH")
+        await _seed_claim_secret(app)
 
         async def fake_run(**kwargs):
             raise RuntimeError("agent died")
@@ -1072,7 +1353,7 @@ async def test_invoke_agent_failure_releases_reservation(app_factory, tmp_path, 
         monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
 
         resp = await c.post("/invoke", json={
-            "capability": "translate", "tx": "u", "nonce": "n:sid-test",
+            "capability": "translate", "tx": "u", "nonce": VALID_NONCE,
             "body": {"text": "hi"},
         })
         # Refund succeeded → runner reports refunded, not error.
@@ -1487,6 +1768,7 @@ async def test_invoke_usdt_happy_path_routes_to_jetton_verifier(app_factory, mon
             tx_hash="usdt-hash", sender="EQsender", recipient="EQagent",
             amount=2_000_000, comment="n:sid-test",
         ))
+        await _seed_claim_secret(app)
 
         async def fake_run(**kwargs):
             return {"result": {"type": "text", "data": "ok"}}
@@ -1495,13 +1777,15 @@ async def test_invoke_usdt_happy_path_routes_to_jetton_verifier(app_factory, mon
 
         resp = await c.post("/invoke", json={
             "capability": "translate", "rail": "USDT",
-            "tx": "user-tx", "nonce": "n:sid-test", "body": {"text": "hi"},
+            "tx": "user-tx", "nonce": VALID_NONCE, "body": {"text": "hi"},
         })
         assert resp.status == 200
         assert (await resp.json())["status"] == "done"
         app.jetton_verifier.verify.assert_awaited_once()
         # Marked against the real on-chain hash, not the user-supplied tx.
-        app.tx_store.mark_processed.assert_awaited_once_with("ton:usdt-hash")
+        marked = [c.args[0] for c in app.tx_store.mark_processed.await_args_list]
+        assert "ton:usdt-hash" in marked
+        assert f"ton:pub:{VALID_PUB}" in marked
 
 
 async def test_invoke_usdt_unavailable_verifier_enqueues_refund(app_factory):
@@ -1513,14 +1797,16 @@ async def test_invoke_usdt_unavailable_verifier_enqueues_refund(app_factory):
         app.jetton_verifier = None
         app._agent_jetton_wallet = None
         app.ensure_jetton_verifier = AsyncMock(return_value=False)
+        await _seed_claim_secret(app)
         resp = await c.post("/invoke", json={
             "capability": "translate", "rail": "USDT",
-            "tx": "usdt-tx", "nonce": "n:sid-test", "body": {"text": "hi"},
+            "tx": "usdt-tx", "nonce": VALID_NONCE, "body": {"text": "hi"},
         })
         assert resp.status == 503
         assert (await resp.json())["refund_pending"] is True
-        entry = await app.refund_queue.get("ton:usdt-tx")
+        entry = await app.refund_queue.get(f"ton:pub:{VALID_PUB}")
         assert entry is not None and entry.rail == "USDT" and entry.status == "pending"
+        assert await app.refund_queue.get("ton:usdt-tx") is None
 
 
 async def test_invoke_stock_reserve_race_after_payment_refunds_and_returns_409(app_factory, tmp_path, monkeypatch):
@@ -1537,9 +1823,10 @@ async def test_invoke_stock_reserve_race_after_payment_refunds_and_returns_409(a
         # Lost the post-payment reservation race.
         app.stock.reserve = AsyncMock(return_value=False)
         app.sender.send = AsyncMock(return_value="REFUND_HASH")
+        await _seed_claim_secret(app)
 
         resp = await c.post("/invoke", json={
-            "capability": "translate", "tx": "user-tx", "nonce": "n:sid-test",
+            "capability": "translate", "tx": "user-tx", "nonce": VALID_NONCE,
             "body": {"text": "hi"},
         })
         assert resp.status == 409

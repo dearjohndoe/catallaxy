@@ -175,3 +175,15 @@ class TestJettonTransferBody:
         s.load_bit()       # custom_payload (0)
         s.load_coins()     # forward_ton_amount
         assert s.load_bit() == 0  # empty inline
+
+
+def test_derive_agent_jetton_wallet_custom_code_differs_from_tether():
+    from tonutils.contracts.jetton.wallet import JettonWalletStandard
+    from chains.ton.jetton import derive_agent_jetton_wallet, USDT_MASTER_MAINNET
+
+    owner = "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs"
+    tether = derive_agent_jetton_wallet(owner, USDT_MASTER_MAINNET, None)
+    std_code = JettonWalletStandard.get_default_code().to_boc().hex()
+    custom = derive_agent_jetton_wallet(owner, USDT_MASTER_MAINNET, std_code)
+    assert tether.startswith("UQ") or tether.startswith("EQ")
+    assert custom != tether

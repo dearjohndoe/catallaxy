@@ -10,7 +10,7 @@ from owner_bot import OwnerBot
 
 from api.constants import DESCRIBE_TIMEOUT
 from api.describe import fetch_describe
-from api.domain.refund_worker import refund_worker_loop
+from api.domain.refund_worker import recover_stale_intents, refund_worker_loop
 from api.infra.balancer_rebuild import balancer_rebuild_loop
 
 if TYPE_CHECKING:
@@ -58,6 +58,7 @@ async def startup(app: "SidecarApp") -> None:
             avatar_url=app.settings.agent_avatar_url,
             images=app.settings.agent_images,
             owner_wallet=app.settings.owner_wallet,
+            rails=app.settings.payment_rails,
         ),
         state_store=app.state_store,
         transfer_sender=app.sender.send,
@@ -84,6 +85,11 @@ async def startup(app: "SidecarApp") -> None:
             logger.exception("JettonPaymentVerifier failed to start")
 
     try:
+        await app.tx_store.init()
+    except Exception:
+        logger.exception("ProcessedTxStore.init failed")
+
+    try:
         await app.refund_queue.init()
     except Exception:
         logger.exception("RefundQueue.init failed")
@@ -92,6 +98,11 @@ async def startup(app: "SidecarApp") -> None:
         await app.free_claims.init()
     except Exception:
         logger.exception("FreeClaimStore.init failed")
+
+    try:
+        await app.claim_secrets.init()
+    except Exception:
+        logger.exception("ClaimSecretStore.init failed")
 
     if app.settings.tg_bot_token and app.settings.tg_user_ids:
         app.owner_bot = OwnerBot(
@@ -111,6 +122,13 @@ async def startup(app: "SidecarApp") -> None:
         await app.heartbeat.send_if_needed(force=False)
     except Exception:
         logger.exception("Initial heartbeat failed")
+
+    # RAM jobs did not survive this process. Refund leftover accepted
+    # intents before we start serving /invoke.
+    try:
+        await recover_stale_intents(app, older_than_seconds=0)
+    except Exception:
+        logger.exception("stale payment-intent recovery failed")
 
     task_coros = [
         app.heartbeat.loop(app.stop_event),
@@ -141,5 +159,6 @@ async def shutdown(app: "SidecarApp") -> None:
     await app.stock.close()
     await app.refund_queue.close()
     await app.free_claims.close()
+    await app.claim_secrets.close()
     if app.owner_bot is not None:
         await app.owner_bot.close()

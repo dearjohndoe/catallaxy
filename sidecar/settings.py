@@ -4,6 +4,8 @@ import os
 import re
 from dataclasses import dataclass
 
+from chains.ton.jetton import USDT_MASTER_MAINNET, USDT_MASTER_TESTNET
+
 
 DEFAULT_SKU_ID = "default"
 
@@ -107,6 +109,11 @@ class Settings:
     # Free-SKU abuse limit: max claims per client IP within the rolling window.
     free_claim_limit: int = 1
     free_claim_window_seconds: int = 2592000  # 30 days
+    # Jetton master for the USDT rail. Default is Tether (mainnet or official
+    # testnet USD). Override with TON_USDT_MASTER / USDT_MASTER for a custom
+    # TEP-74 minter — then also set TON_JETTON_WALLET_CODE.
+    usdt_master: str = USDT_MASTER_MAINNET
+    jetton_wallet_code_hex: str | None = None
 
     @property
     def capability(self) -> str:
@@ -428,7 +435,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         refund_max_attempts=int(os.getenv("REFUND_MAX_ATTEMPTS", "10")),
         agent_price_usdt=agent_price_usdt,
         has_quote=_env_bool("AGENT_HAS_QUOTE", False),
-        rate_limit_requests=int(os.getenv("RATE_LIMIT_REQUESTS", "60")),
+        rate_limit_requests=int(os.getenv("RATE_LIMIT_REQUESTS", "120")),
         rate_limit_window=int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60")),
         trusted_proxy_ips=frozenset(
             ip.strip() for ip in os.getenv("TRUSTED_PROXY_IPS", "").split(",") if ip.strip()
@@ -448,4 +455,12 @@ def load_settings(env_file: str | None = None) -> Settings:
         payment_rails=tuple(rails),
         tg_bot_token=tg_bot_token,
         tg_user_ids=tg_user_ids,
+        usdt_master=(
+            _chain_env("TON", "USDT_MASTER", "USDT_MASTER")
+            or (USDT_MASTER_TESTNET if testnet else USDT_MASTER_MAINNET)
+        ),
+        jetton_wallet_code_hex=(
+            (_chain_env("TON", "JETTON_WALLET_CODE", "JETTON_WALLET_CODE") or "").strip()
+            or None
+        ),
     )

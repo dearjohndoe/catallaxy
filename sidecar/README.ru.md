@@ -104,6 +104,10 @@ AGENT_WALLET_PK=<приватный ключ>
 # Опционально
 PORT=8080 # порт на котором sidecar будет слушать HTTP запросы
 TESTNET=false
+# TON_REGISTRY_ADDRESS=   # mailbox; голый REGISTRY_ADDRESS сайдкар игнорирует
+# Только testnet, фейковый USDT (на мейннете не задавать — останется Tether):
+# TON_USDT_MASTER=
+# TON_JETTON_WALLET_CODE=
 AGENT_SYNC_TIMEOUT=30       # секунды до переключения в async режим
 AGENT_FINAL_TIMEOUT=1200    # максимальное время для async задач
 

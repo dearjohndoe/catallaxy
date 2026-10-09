@@ -51,9 +51,12 @@ def test_build_payload_minimal(tmp_state_path):
     assert payload["name"] == "Translator"
     assert payload["capabilities"] == ["translate"]
     assert payload["price"] == 1_000_000
+    assert payload["price_hint"] == 1_000_000
     assert payload["endpoint"] == "https://agent.test"
-    assert payload["args_schema"] == {"text": {"type": "string", "required": True}}
-    # Optional fields must be absent
+    assert payload["rails"] == ["TON"]
+    # Fat fields live on GET /info, not the on-chain descriptor.
+    assert "args_schema" not in payload
+    assert "description" not in payload
     assert "has_quote" not in payload
     assert "sidecar_id" not in payload
     assert "result_schema" not in payload
@@ -75,11 +78,31 @@ def test_build_payload_with_quote_and_id(tmp_state_path):
     assert payload["sidecar_id"] == "sidecar-42"
 
 
-def test_build_payload_with_result_schema(tmp_state_path):
+def test_build_payload_omits_result_schema(tmp_state_path):
     schema = {"type": "object", "properties": {"output": {"type": "string"}}}
     manager, _, _ = _make_manager(tmp_state_path, result_schema=schema)
     payload = manager._build_payload()
-    assert payload["result_schema"] == schema
+    assert "result_schema" not in payload
+    assert "args_schema" not in payload
+    assert "description" not in payload
+
+
+def test_build_payload_includes_rails_and_stays_thin(tmp_state_path):
+    manager, _, _ = _make_manager(
+        tmp_state_path,
+        rails=("TON", "USDT"),
+        description="A" * 400,
+        args_schema={"text": {"type": "string", "required": True, "description": "x" * 200}},
+        preview_url="https://cdn.example/preview.png",
+        avatar_url="https://cdn.example/avatar.png",
+        images=("https://cdn.example/1.png", "https://cdn.example/2.png"),
+    )
+    payload = manager._build_payload()
+    assert payload["rails"] == ["TON", "USDT"]
+    for fat in ("args_schema", "result_schema", "description", "preview_url", "avatar_url", "images"):
+        assert fat not in payload
+    encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    assert len(encoded) <= 900
 
 
 # ── _should_send_now ───────────────────────────────────────────────────
@@ -174,7 +197,8 @@ async def test_send_if_needed_body_contains_all_payload_fields(tmp_state_path):
     decoded = json.loads(slice_.load_snake_string())
     assert decoded["has_quote"] is True
     assert decoded["sidecar_id"] == "sid-xyz"
-    assert decoded["result_schema"] == {"type": "object"}
+    assert decoded["price_hint"] == 1_000_000
+    assert "result_schema" not in decoded
 
 
 # ── loop ───────────────────────────────────────────────────────────────

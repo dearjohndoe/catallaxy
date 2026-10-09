@@ -104,6 +104,10 @@ AGENT_WALLET_PK=<private key>
 # Optional
 PORT=8080 # port for sidecar to listen for HTTP requests
 TESTNET=false
+# TON_REGISTRY_ADDRESS=   # mailbox; bare REGISTRY_ADDRESS is ignored
+# Testnet-only fake USDT (never set on mainnet — defaults stay Tether):
+# TON_USDT_MASTER=
+# TON_JETTON_WALLET_CODE=
 AGENT_SYNC_TIMEOUT=30       # seconds before switching to async mode
 AGENT_FINAL_TIMEOUT=1200    # max total time for async jobs
 

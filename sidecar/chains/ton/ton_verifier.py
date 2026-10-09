@@ -49,13 +49,15 @@ class PaymentVerifier:
         relay_url = get_relay_url()
         if relay_url:
             self._relay_client = _RelayClient(relay_url)
-            await self._relay_client.subscribe(
+            # Monitor exists before /subscribe succeeds so the process is not
+            # left half-dead; is_healthy stays False until the relay accepts us.
+            self._monitor = RemoteWalletMonitor(self._relay_client, self._agent_wallet)
+            await self._monitor.start()
+            await self._relay_client.subscribe_or_keep_trying(
                 agent_wallet=self._agent_wallet,
                 jetton_wallet=None,
                 label=None,
             )
-            self._monitor = RemoteWalletMonitor(self._relay_client, self._agent_wallet)
-            await self._monitor.start()
             logger.info("PaymentVerifier started in REMOTE mode via %s", relay_url)
             return
 
@@ -138,9 +140,10 @@ class PaymentVerifier:
                     raise PaymentVerificationError("Transaction sender is missing")
 
                 comment = _parse_payment_nonce(tx.in_msg.body) or nonce.value
-                # Evict nonce from cache and use the on-chain tx hash (not user-supplied)
-                # to prevent replay attacks with fake tx_hash values.
-                await self._monitor.consume(nonce.value)
+                # Peek only. Evicting here (before mark_processed / refund
+                # enqueue) drops the tx from cache while the lt watermark has
+                # already passed — a cancelled handler then cannot re-verify.
+                # Caller consumes after the durable write.
                 real_tx_hash = tx.cell.hash.hex()
                 return VerifiedPayment(
                     tx_hash=real_tx_hash,
@@ -157,3 +160,14 @@ class PaymentVerifier:
             # In remote mode `force()` is a no-op (relay polls on its own).
             self._monitor.force()
             await asyncio.sleep(self.VERIFY_POLL)
+
+    async def consume(self, raw_nonce: str) -> None:
+        """Drop ``raw_nonce`` from the monitor cache. Call only after a durable
+        ``mark_processed`` or refund enqueue. Best-effort, never raises."""
+        if self._monitor is None:
+            return
+        try:
+            nonce = parse_nonce(raw_nonce)
+            await self._monitor.consume(nonce.value)
+        except Exception:
+            logger.exception("PaymentVerifier.consume failed nonce=%s", raw_nonce)

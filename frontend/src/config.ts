@@ -1,6 +1,7 @@
-// Catallaxy registry contract — hardcoded, not a build-time env knob.
-// Pointing the UI at any other address would just show an empty marketplace.
-export const REGISTRY_ADDRESS = 'UQCYxSFNCJHmBxVpgfqAesgjLQDsLch3WJG3MJYyhnBDS7gg'
+// Official Catallaxy mailbox. Override with VITE_REGISTRY_ADDRESS (e2e testnet).
+export const REGISTRY_ADDRESS =
+  ((import.meta.env.VITE_REGISTRY_ADDRESS as string | undefined) ?? '').trim()
+  || 'UQCYxSFNCJHmBxVpgfqAesgjLQDsLch3WJG3MJYyhnBDS7gg'
 export const TESTNET = import.meta.env.VITE_TESTNET === 'true'
 export const TONCENTER_BASE = TESTNET
   ? 'https://testnet.toncenter.com/api/v3'

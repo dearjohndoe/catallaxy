@@ -17,7 +17,11 @@ logger = logging.getLogger(__name__)
 
 MAX_IMAGES = 5
 MAX_URL_LEN = 512
-MAX_PAYLOAD_BYTES = 2048
+# Shared v2 budget: Solana memo room is ~900 bytes of the 1232-byte tx.
+# TON cells can hold more; we stay on the tighter cap so both registries
+# speak the same thin descriptor. Fat fields (schemas, description, media)
+# live on GET /info — see PROTOCOL.md §3 and MULTICHAIN_PLAN.md §4.1.
+MAX_PAYLOAD_BYTES = 900
 _ALLOWED_SCHEMES = {"http", "https"}
 
 
@@ -55,6 +59,7 @@ class HeartbeatConfig:
     avatar_url: str | None = None
     images: tuple[str, ...] = field(default_factory=tuple)
     owner_wallet: str | None = None
+    rails: tuple[str, ...] = field(default_factory=lambda: ("TON",))
 
 
 class HeartbeatManager:
@@ -73,56 +78,39 @@ class HeartbeatManager:
         self._immediate_threshold = timedelta(days=immediate_threshold_days)
 
     def _build_payload(self) -> dict[str, Any]:
+        """CTLX/2 thin heartbeat. Fat fields stay on GET /info.
+
+        Dual-writes ``price`` alongside ``price_hint`` so CTLX/1 readers
+        (frontend/MCP that key on ``payload.price``) keep showing a number
+        without understanding the new name. Does **not** emit description,
+        schemas, or media — those blew the 2048-byte TON cap and will not
+        fit a Solana memo.
+        """
+        rails = list(self._config.rails) or ["TON"]
         payload: dict[str, Any] = {
             "name": self._config.name,
-            "description": self._config.description,
-            "capabilities": list(self._config.capabilities),
-            "price": self._config.price,
             "endpoint": self._config.endpoint,
-            "args_schema": self._config.args_schema,
+            "rails": rails,
+            "price_hint": self._config.price,
+            "price": self._config.price,  # CTLX/1 alias
+            "capabilities": list(self._config.capabilities),
         }
+        if self._config.sidecar_id:
+            payload["sidecar_id"] = self._config.sidecar_id
         if self._config.has_quote:
             payload["has_quote"] = True
         if self._config.price_usdt is not None:
             payload["price_usdt"] = self._config.price_usdt
-        if self._config.sidecar_id:
-            payload["sidecar_id"] = self._config.sidecar_id
-        if self._config.result_schema:
-            payload["result_schema"] = self._config.result_schema
         if self._config.owner_wallet:
             payload["owner_wallet"] = self._config.owner_wallet
-
-        if self._config.preview_url:
-            if _valid_image_url(self._config.preview_url):
-                payload["preview_url"] = self._config.preview_url
-            else:
-                logger.warning("Dropping invalid preview_url: %s", self._config.preview_url)
-
-        if self._config.avatar_url:
-            if _valid_image_url(self._config.avatar_url):
-                payload["avatar_url"] = self._config.avatar_url
-            else:
-                logger.warning("Dropping invalid avatar_url: %s", self._config.avatar_url)
-
-        if self._config.images:
-            valid = [u for u in self._config.images if _valid_image_url(u)]
-            dropped = len(self._config.images) - len(valid)
-            if dropped:
-                logger.warning("Dropped %d invalid image URL(s) from heartbeat", dropped)
-            if len(valid) > MAX_IMAGES:
-                logger.warning("Truncating images to %d (had %d)", MAX_IMAGES, len(valid))
-                valid = valid[:MAX_IMAGES]
-            if valid:
-                payload["images"] = valid
 
         encoded_len = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         if encoded_len > MAX_PAYLOAD_BYTES:
             logger.warning(
-                "Heartbeat payload too large (%d bytes > %d); dropping media fields",
+                "Heartbeat payload too large (%d bytes > %d); dropping capabilities",
                 encoded_len, MAX_PAYLOAD_BYTES,
             )
-            for k in ("preview_url", "avatar_url", "images"):
-                payload.pop(k, None)
+            payload.pop("capabilities", None)
 
         return payload
 

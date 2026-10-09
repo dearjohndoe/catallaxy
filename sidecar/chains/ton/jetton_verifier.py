@@ -31,6 +31,7 @@ class JettonPaymentVerifier:
         payment_timeout_seconds: int,
         testnet: bool = False,
         tonapi_client: TonAPIClient | None = None,
+        jetton_wallet_code_hex: str | None = None,
     ) -> None:
         self._agent_wallet = agent_wallet
         self._usdt_master = usdt_master
@@ -42,18 +43,15 @@ class JettonPaymentVerifier:
         self.jetton_wallet_address: str = ""
         self._tonapi_client = tonapi_client
         self._relay_client: _RelayClient | None = None
+        # None → Tether USDT (stablecoin packing + pinned code). Set only for
+        # a custom TEP-74 minter (e2e CTLXUSDT); must not be set on mainnet.
+        self._jetton_wallet_code_hex = jetton_wallet_code_hex
 
     async def start(self) -> None:
-        from tonutils.contracts.jetton.master import JettonMasterStablecoin
-        from chains.ton.jetton import USDT_JETTON_WALLET_CODE_HEX
+        from chains.ton.jetton import derive_agent_jetton_wallet
 
-        addr = JettonMasterStablecoin.calculate_user_jetton_wallet_address(
-            owner_address=self._agent_wallet,
-            jetton_master_address=self._usdt_master,
-            jetton_wallet_code=USDT_JETTON_WALLET_CODE_HEX,
-        )
-        self.jetton_wallet_address = addr.to_str(
-            is_user_friendly=True, is_bounceable=False,
+        self.jetton_wallet_address = derive_agent_jetton_wallet(
+            self._agent_wallet, self._usdt_master, self._jetton_wallet_code_hex,
         )
 
         relay_url = get_relay_url()
@@ -61,15 +59,15 @@ class JettonPaymentVerifier:
             # Remote mode — relay watches the jetton wallet for us. No LiteBalancer
             # involved at any point.
             self._relay_client = _RelayClient(relay_url)
-            await self._relay_client.subscribe(
-                agent_wallet=None,
-                jetton_wallet=self.jetton_wallet_address,
-                label=None,
-            )
             self._monitor = RemoteJettonWalletMonitor(
                 self._relay_client, self.jetton_wallet_address,
             )
             await self._monitor.start()
+            await self._relay_client.subscribe_or_keep_trying(
+                agent_wallet=None,
+                jetton_wallet=self.jetton_wallet_address,
+                label=None,
+            )
             logger.info(
                 "JettonPaymentVerifier started in REMOTE mode: jetton_wallet=%s",
                 self.jetton_wallet_address,
@@ -149,7 +147,8 @@ class JettonPaymentVerifier:
                 if not entry.sender:
                     raise PaymentVerificationError("Transaction sender is missing")
 
-                await self._monitor.consume(nonce.value)
+                # Peek only — see PaymentVerifier.verify. Caller consumes after
+                # mark_processed / refund enqueue.
                 real_tx_hash = entry.tx.cell.hash.hex()
                 return VerifiedPayment(
                     tx_hash=real_tx_hash,
@@ -164,3 +163,14 @@ class JettonPaymentVerifier:
 
             self._monitor.force()
             await asyncio.sleep(self.VERIFY_POLL)
+
+    async def consume(self, raw_nonce: str) -> None:
+        """Drop ``raw_nonce`` from the monitor cache. Call only after a durable
+        ``mark_processed`` or refund enqueue. Best-effort, never raises."""
+        if self._monitor is None:
+            return
+        try:
+            nonce = parse_nonce(raw_nonce)
+            await self._monitor.consume(nonce.value)
+        except Exception:
+            logger.exception("JettonPaymentVerifier.consume failed nonce=%s", raw_nonce)

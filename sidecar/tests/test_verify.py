@@ -256,7 +256,37 @@ async def test_payment_verifier_success():
     assert result.tx_hash != "user-supplied"
     assert result.sender == "EQsender"
     assert result.amount == 5000
-    monitor.consume.assert_called_once_with("abc:sidecar")
+    # Peek only: consume runs after mark_processed, not inside verify.
+    monitor.consume.assert_not_called()
+
+
+async def test_payment_verifier_success_leaves_cache_for_retry():
+    """Cancelled /invoke after verify must still find the payment in cache."""
+    v = PaymentVerifier(agent_wallet="EQw", min_amount=1000, payment_timeout_seconds=300)
+    tx = _mk_verified_tx(
+        sender="EQsender", amount=5000, now_ts=int(time.time()),
+        nonce="abc:sidecar", hash_hex="bb" * 32,
+    )
+    cache = {"abc:sidecar": tx}
+
+    class _Mon:
+        async def get(self, n):
+            return cache.get(n.strip())
+
+        async def consume(self, n):
+            return cache.pop(n.strip(), None)
+
+        def force(self):
+            return None
+
+    v._monitor = _Mon()
+    first = await v.verify(tx_hash="user-supplied", raw_nonce="abc:sidecar")
+    assert first.tx_hash == "bb" * 32
+    assert "abc:sidecar" in cache
+    second = await v.verify(tx_hash="user-supplied", raw_nonce="abc:sidecar")
+    assert second.tx_hash == first.tx_hash
+    await v.consume("abc:sidecar")
+    assert "abc:sidecar" not in cache
 
 
 async def test_payment_verifier_amount_below_min_rejected():
@@ -268,6 +298,7 @@ async def test_payment_verifier_amount_below_min_rejected():
 
     with pytest.raises(PaymentVerificationError, match="lower than required"):
         await v.verify("tx", "n")
+    v._monitor.consume.assert_not_called()
 
 
 async def test_payment_verifier_min_amount_override():
@@ -292,6 +323,7 @@ async def test_payment_verifier_session_expired():
 
     with pytest.raises(PaymentVerificationError, match="session expired"):
         await v.verify("tx", "n")
+    v._monitor.consume.assert_not_called()
 
 
 async def test_payment_verifier_missing_sender_rejected():

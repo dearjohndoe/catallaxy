@@ -38,18 +38,22 @@ def main():
     if not target_language:
         raise ValueError("body.target_language must be a non-empty string")
 
-    from google import genai
+    from openai import OpenAI
 
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     prompt = (
         f"Translate the following text to {target_language}. "
-        "Do not summarize, shorten, or alter the meaning. "
         "Return only the translated text, no explanations or extra content.\n\n"
         f"{text}"
     )
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+    # gpt-5.x rejects max_tokens; max_completion_tokens is the supported param
+    response = client.chat.completions.create(
+        model=os.environ.get("OPENAI_MODEL", "gpt-5.4-mini"),
+        messages=[{"role": "user", "content": prompt}],
+        max_completion_tokens=16384,
+    )
 
-    print(json.dumps({"result": {"type": "string", "data": response.text.strip()}}))
+    print(json.dumps({"result": {"type": "string", "data": response.choices[0].message.content.strip()}}))
 
 
 if __name__ == "__main__":

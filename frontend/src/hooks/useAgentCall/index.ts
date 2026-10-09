@@ -20,7 +20,7 @@ export function useAgentCall(
 ) {
   const s = useCallState(agent)
   useGatewayMode(agent.endpoint, expanded, s.setConnMode)
-  useAgentInfoSync(agent.endpoint, expanded, s)
+  useAgentInfoSync(agent.endpoint, agent.sidecarId, expanded, s)
   useQuoteCountdown(s.status, s.quote, s.setQuoteSecondsLeft, s.countdownRef)
 
   const selectedSku: Sku | null = s.skus.find(sk => sk.id === s.selectedSkuId) ?? null
@@ -69,7 +69,8 @@ export function useAgentCall(
     })
     if (pay.kind === 'error') { s.setStatus('error'); s.setErrorMsg(pay.message); return }
     s.setPaymentOptions(pay.value.paymentOptions)
-    s.setLastNonce(pay.value.paymentRequest.nonce)
+    // Rating payload is on-chain — only the public memo, never the claim secret.
+    s.setLastNonce(pay.value.paymentRequest.memo)
 
     s.setStatus('invoking')
     const inv = await runInvoke({

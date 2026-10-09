@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
-import uuid
+import time
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
-from chains.base import ChainRail, chain_for_rail, namespaced_tx_key
-from payments import PaymentVerificationError
+from chains.base import ChainRail, chain_for_rail, namespaced_pub_key, namespaced_tx_key
+from payments import PaymentVerificationError, mint_nonce, pub_from_nonce
 from settings import AgentSku
 
 from api.http.responses import render_done_response
@@ -19,10 +20,46 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("sidecar")
 
+# Housekeeping TTL for claim_secrets rows — deliberately independent of
+# payment_timeout (see build_402_response). Generous enough that a slow
+# payer never spuriously loses their claim secret; the sidecar's own
+# payment-freshness check (ton_verifier, anchored to on-chain tx time) is
+# what actually bounds how long a payment session can be.
+CLAIM_SECRET_TTL_SECONDS = 3600
+
 
 def unlock_quote(quote_id: str | None, sidecar: "SidecarApp") -> None:
     if quote_id and quote_id in sidecar.quotes:
         sidecar.quotes[quote_id].locked = False
+
+
+async def consume_monitor_nonce(sidecar: "SidecarApp", rail: str, nonce: str) -> None:
+    """Evict ``nonce`` from the rail monitor cache after a durable write.
+
+    No-op if the rail is missing. Never raises. Must not run before
+    ``mark_processed`` / refund enqueue, and must not run on paths where
+    verify never succeeded (the refund worker recovers sender/amount from
+    the same cache).
+    """
+    try:
+        rail_obj = sidecar.rails.get(rail)
+        if rail_obj is None:
+            return
+        await rail_obj.consume(nonce)
+    except Exception:
+        logger.exception("consume_monitor_nonce failed rail=%s nonce=%s", rail, nonce)
+
+
+def payment_identity_key(rail: str, nonce: str) -> str | None:
+    """Refund-queue / claim-block key: ``{chain}:pub:{pub}``.
+
+    ``nonce`` is a full claim nonce or the rebound pub_nonce. Client ``tx``
+    is never part of this key.
+    """
+    pub = pub_from_nonce(nonce)
+    if pub is None:
+        return None
+    return namespaced_pub_key(chain_for_rail(rail), pub)
 
 
 async def enqueue_refund_after_payment(
@@ -43,16 +80,25 @@ async def enqueue_refund_after_payment(
     ``mark_processed`` has already run but service was NOT delivered.
     """
     unlock_quote(parsed.quote_id, sidecar)
-    try:
-        await sidecar.refund_queue.enqueue(
-            tx_hash=namespaced_tx_key(chain_for_rail(parsed.rail), parsed.tx_hash),
-            nonce=parsed.nonce,
-            rail=parsed.rail,
-            sender=sender,
-            amount=amount,
-            sku_id=sku.sku_id,
-            force_refund=force,
+    queue_key = payment_identity_key(parsed.rail, parsed.nonce)
+    if queue_key is None:
+        # Should be unreachable after split-nonce rebind; never fall back to
+        # client tx (that was the refund+goods split).
+        logger.error(
+            "refund enqueue missing pub identity rail=%s nonce=%s tx=%s",
+            parsed.rail, parsed.nonce, parsed.tx_hash,
         )
+    try:
+        if queue_key is not None:
+            await sidecar.refund_queue.enqueue(
+                tx_hash=queue_key,
+                nonce=parsed.nonce,
+                rail=parsed.rail,
+                sender=sender,
+                amount=amount,
+                sku_id=sku.sku_id,
+                force_refund=force,
+            )
     except Exception:
         # Last resort: queue itself unavailable. Log loudly — ops must reconcile
         # manually. We still return refund_pending so the caller doesn't retry
@@ -122,30 +168,59 @@ async def build_402_response(
             headers={"Retry-After": "60"},
         )
 
-    nonce = parsed.nonce
-    if not nonce or not nonce.endswith(f":{sidecar.sidecar_id}"):
-        nonce = f"{uuid.uuid4().hex[:16]}:{sidecar.sidecar_id}"
-
-    payment_options: list[dict[str, Any]] = []
-    for rail, amount in priced:
-        opt = rail.payment_option(amount, nonce)
-        opt["sku"] = sku.sku_id  # not rail-specific; added by the caller
-        payment_options.append(opt)
-
     # This happens when an SKU uses dynamic pricing and the agent omitted it from
     # `mode=prices` — typically because it's out of stock upstream. Emitting a
     # 402 with empty payment_options makes price-less clients build a payment
     # from undefined address/amount and crash; report out_of_stock instead.
-    if not payment_options:
+    # Checked before minting a claim secret below so we don't write a row that
+    # will never back a usable 402.
+    if not priced:
         logger.info(
             "preflight: no purchasable price for sku=%s (dynamic price unresolved) "
             "— reporting out_of_stock", sku.sku_id,
         )
         return web.json_response({"error": "out_of_stock", "sku": sku.sku_id}, status=409)
 
+    # Split-nonce claim auth (TODO-claim-auth.md, PROTOCOL.md §5/§6.1): mint a
+    # fresh pub(8 hex)+sec(8 hex) pair, persist a hash of `sec` keyed by `pub`,
+    # and advertise only the public half (`pub_nonce`) on-chain via `memo` /
+    # the payment cell. `full_nonce` (containing `sec`) is exposed solely in
+    # the JSON body's `payment_options[].nonce` field — never in the
+    # `x-ton-pay-nonce` header, never in `memo`.
+    #
+    # TTL is deliberately NOT derived from `payment_timeout`: that setting
+    # gates payment *freshness* on a different clock (verify_payment checks
+    # `now - tx.now`, anchored to when the on-chain payment confirmed).
+    # Anchoring this TTL to mint time instead would falsely reject a buyer
+    # who simply took a while to broadcast payment after seeing the 402
+    # (wallet app, cross-device QR, etc.) even though their payment is still
+    # fresh. This TTL only needs to outlive a realistic "time to pay" window
+    # — it's housekeeping so `claim_secrets` doesn't grow unbounded, not a
+    # session-length control.
+    pub, sec, pub_nonce, full_nonce = mint_nonce(sidecar.sidecar_id)
+    try:
+        await sidecar.claim_secrets.insert(
+            pub, hashlib.sha256(sec.encode()).hexdigest(),
+            int(time.time()) + CLAIM_SECRET_TTL_SECONDS,
+        )
+    except Exception:
+        logger.exception("claim_secrets.insert failed — claim will 403 later, refusing 402")
+        return web.json_response(
+            {"error": "service temporarily unavailable", "retry_after_seconds": 30},
+            status=503,
+            headers={"Retry-After": "30"},
+        )
+
+    payment_options: list[dict[str, Any]] = []
+    for rail, amount in priced:
+        opt = rail.payment_option(amount, pub_nonce)
+        opt["sku"] = sku.sku_id  # not rail-specific; added by the caller
+        opt["nonce"] = full_nonce  # full claim value; JSON body only, never on-chain
+        payment_options.append(opt)
+
     resp_body: dict[str, Any] = {
         "error": "Payment required",
-        "payment_request": payment_options[0] if payment_options else {},
+        "payment_request": payment_options[0],
         "payment_options": payment_options,
     }
 
@@ -153,7 +228,10 @@ async def build_402_response(
     if eff_ton:
         headers["x-ton-pay-address"] = sidecar.settings.agent_wallet
         headers["x-ton-pay-amount"] = str(min_ton)
-        headers["x-ton-pay-nonce"] = nonce
+        # Public-only half, matching `memo` — NOT the full claim nonce. A
+        # header-only client has no way to claim under the split-nonce
+        # scheme (it never sees `sec`); see PROTOCOL.md §5.
+        headers["x-ton-pay-nonce"] = pub_nonce
 
     return web.json_response(resp_body, status=402, headers=headers)
 
@@ -174,12 +252,19 @@ async def verify_payment(
                 # (start() failed at boot).
                 bootstrapped = await sidecar.ensure_jetton_verifier()
                 if not bootstrapped:
-                    await sidecar.refund_queue.enqueue(
-                        tx_hash=namespaced_tx_key(chain_for_rail("USDT"), parsed.tx_hash),
-                        nonce=parsed.nonce,
-                        rail="USDT",
-                        sku_id=sku.sku_id,
-                    )
+                    usdt_key = payment_identity_key("USDT", parsed.nonce)
+                    if usdt_key is None:
+                        logger.error(
+                            "USDT refund enqueue missing pub identity nonce=%s tx=%s",
+                            parsed.nonce, parsed.tx_hash,
+                        )
+                    else:
+                        await sidecar.refund_queue.enqueue(
+                            tx_hash=usdt_key,
+                            nonce=parsed.nonce,
+                            rail="USDT",
+                            sku_id=sku.sku_id,
+                        )
                     unlock_quote(parsed.quote_id, sidecar)
                     logger.warning(
                         "USDT payment received but jetton_verifier unavailable — "
@@ -278,12 +363,15 @@ async def claim_stock(
         refund_tx: str | None = None
         refund_send_failed = False
         try:
+            oos_key = payment_identity_key(parsed.rail, parsed.nonce)
+            if oos_key is None:
+                oos_key = namespaced_tx_key(
+                    chain_for_rail(parsed.rail), verified_payment.tx_hash,
+                )
             refund_tx = await sidecar.refund_user(
                 recipient=verified_payment.sender,
                 payment_amount=verified_payment.amount,
-                original_tx_hash=namespaced_tx_key(
-                    chain_for_rail(parsed.rail), verified_payment.tx_hash,
-                ),
+                original_tx_hash=oos_key,
                 reason="out_of_stock",
                 rail=parsed.rail,
             )

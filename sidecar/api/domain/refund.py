@@ -4,8 +4,10 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from chains.base import chain_for_rail, namespaced_pub_key
 from chains.ton.jetton import JETTON_TRANSFER_OPCODE
 from chains.ton.transfer import REFUND_OPCODE
+from payments.nonce import pub_from_nonce
 
 if TYPE_CHECKING:
     from payments.refund_queue import RefundQueue
@@ -141,16 +143,19 @@ async def refund_or_enqueue(
     (runner failure, agent reported out_of_stock). The queue entry must bypass
     the worker's is_processed race-guard, hence force_refund=True.
     """
+    pub = pub_from_nonce(nonce)
+    queue_key = namespaced_pub_key(chain_for_rail(rail), pub) if pub else tx_hash
+
     try:
         refund_tx = await refund_user_fn(
             recipient=sender,
             payment_amount=amount,
-            original_tx_hash=tx_hash,
+            original_tx_hash=queue_key,
             reason=reason,
             rail=rail,
         )
     except Exception:
-        logger.exception("Direct refund raised tx=%s; falling back to queue", tx_hash)
+        logger.exception("Direct refund raised tx=%s; falling back to queue", queue_key)
         refund_tx = None
 
     if refund_tx:
@@ -158,12 +163,12 @@ async def refund_or_enqueue(
 
     try:
         await refund_queue.enqueue(
-            tx_hash=tx_hash, nonce=nonce, rail=rail,
+            tx_hash=queue_key, nonce=nonce, rail=rail,
             sender=sender, amount=amount, sku_id=sku_id,
             force_refund=True,
         )
     except Exception:
         logger.exception(
-            "refund_queue.enqueue failed tx=%s — manual reconciliation needed", tx_hash,
+            "refund_queue.enqueue failed tx=%s — manual reconciliation needed", queue_key,
         )
     return None

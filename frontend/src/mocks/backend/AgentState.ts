@@ -33,6 +33,11 @@ export class AgentState {
   quotes = new Map<string, QuoteEntry>()
   jobs = new Map<string, JobRecord>()
   freeClaims = new Map<string, number>() // skuId -> claims used (mock: single client)
+  // pub -> sec, mirrors the sidecar's claim_secrets gate (split-nonce, see
+  // TODO-claim-auth.md). Modelling this for real (not just aliasing memo to
+  // nonce) means a frontend regression that sends `memo` as the claim
+  // `nonce` gets caught here too, not just against a live sidecar.
+  private pendingClaimSecrets = new Map<string, string>()
   private onPersist?: () => void
 
   constructor(fx: SidecarFixture, onPersist?: () => void) {
@@ -60,7 +65,35 @@ export class AgentState {
     this.quotes.clear()
     this.jobs.clear()
     this.freeClaims.clear()
+    this.pendingClaimSecrets.clear()
     this.onPersist?.()
+  }
+
+  /** 8 hex chars, zero-padded — `Math.random().toString(16)` can be shorter. */
+  private hex8(): string {
+    return Math.random().toString(16).slice(2).padEnd(8, '0').slice(0, 8)
+  }
+
+  /** Mint a fresh pub/sec pair and register it, mirroring `mint_nonce` +
+   * `claim_secrets.insert` on the real sidecar. */
+  private mintClaimSecret(): { memo: string; fullNonce: string } {
+    const pub = this.hex8()
+    const sec = this.hex8()
+    this.pendingClaimSecrets.set(pub, sec)
+    const sidecarId = this.fx.sidecarId
+    return { memo: `${pub}:${sidecarId}`, fullNonce: `${pub}${sec}:${sidecarId}` }
+  }
+
+  /** Mirrors `split_full_nonce`: split on the FIRST `:` only (sidecar_id is
+   * the suffix), not a naive split-on-all-colons. */
+  private splitFullNonce(nonce: string | undefined): { pub: string; sec: string } | null {
+    if (!nonce) return null
+    const idx = nonce.indexOf(':')
+    if (idx < 0) return null
+    const hexPart = nonce.slice(0, idx)
+    const suffix = nonce.slice(idx + 1)
+    if (hexPart.length !== 16 || !suffix) return null
+    return { pub: hexPart.slice(0, 8), sec: hexPart.slice(8) }
   }
 
   serialize(): PersistedAgentState {
@@ -282,27 +315,29 @@ export class AgentState {
       const left = this.stockLeft(sku.id)
       if (left != null && left <= 0) return { status: 409, body: { error: 'out_of_stock', sku: sku.id } }
 
-      const nonce = req.nonce && req.nonce.endsWith(`:${this.fx.sidecarId}`)
-        ? req.nonce
-        : `${Math.random().toString(16).slice(2, 18)}:${this.fx.sidecarId}`
-
+      // Real sidecar always mints fresh (build_402_response ignores any
+      // client-supplied nonce) — mirror that rather than reusing req.nonce.
       const wallet = this.fx.agent.wallet ?? this.fx.agent.address
       const options: any[] = []
       if (sku.priceTon != null) {
+        const { memo, fullNonce } = this.mintClaimSecret()
         options.push({
           rail: 'TON',
           address: wallet,
           amount: String(quoteEntry?.price ?? sku.priceTon),
-          memo: nonce,
+          memo,
+          nonce: fullNonce,
           sku: sku.id,
         })
       }
       if (sku.priceUsdt != null) {
+        const { memo, fullNonce } = this.mintClaimSecret()
         options.push({
           rail: 'USDT',
           address: wallet,
           amount: String(quoteEntry?.priceUsdt ?? sku.priceUsdt),
-          memo: nonce,
+          memo,
+          nonce: fullNonce,
           sku: sku.id,
           token: {
             symbol: 'USDT',
@@ -324,6 +359,13 @@ export class AgentState {
         },
       }
     }
+
+    // ── Split-nonce claim-secret check, mirrors handle_invoke ─────
+    const claimSplit = this.splitFullNonce(req.nonce)
+    if (!claimSplit || this.pendingClaimSecrets.get(claimSplit.pub) !== claimSplit.sec) {
+      return { status: 403, body: { error: 'invalid or expired claim' } }
+    }
+    this.pendingClaimSecrets.delete(claimSplit.pub)
 
     // ── Paid invoke: needs reservation ───────────────────────────
     let reservationKey: string
