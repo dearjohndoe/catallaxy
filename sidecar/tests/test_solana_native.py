@@ -29,7 +29,7 @@ from chains.solana.sol_monitor import (
     parse_sol_payment,
     pay_memo,
 )
-from payments.types import PaymentVerificationError
+from payments.types import PaymentVerificationError, UnderpaidPayment
 from settings import AgentSku, DEFAULT_SKU_ID
 
 from tests.test_api import app_factory, _serve_app  # noqa: F401 (app_factory is a fixture)
@@ -325,6 +325,41 @@ async def test_verify_underpaid_is_definitive_rejection():
         await rail.verify(proof="", nonce=PUB_NONCE, min_amount=10)
 
 
+async def test_verify_underpaid_carries_payment_for_refund():
+    rpc = FakeRpc()
+    rail = _rail(rpc)
+    sig = rpc.pay(source="buyer", dest=str(rail.pay_to), lamports=9, memo=pay_memo(PUB_NONCE))
+    await rail.monitor.poll()
+    with pytest.raises(UnderpaidPayment) as ei:
+        await rail.verify(proof="", nonce=PUB_NONCE, min_amount=10)
+    assert (ei.value.payment.tx_hash, ei.value.payment.sender, ei.value.payment.amount) == (sig, "buyer", 9)
+    assert ei.value.required == 10
+
+
+async def test_verify_zero_amount_is_not_refundable():
+    rpc = FakeRpc()
+    rail = _rail(rpc)
+    rpc.pay(source="buyer", dest=str(Keypair().pubkey()), lamports=10, memo=pay_memo(PUB_NONCE))
+    await rail.monitor.poll()
+    with pytest.raises(PaymentVerificationError) as ei:
+        await rail.verify(proof="", nonce=PUB_NONCE, min_amount=10)
+    assert not isinstance(ei.value, UnderpaidPayment)
+
+
+async def test_verify_accepts_topup_hint_only_after_underpaid_first_tx():
+    rpc = FakeRpc()
+    rail = _rail(rpc)
+    first = rpc.pay(source="buyer", dest=str(rail.pay_to), lamports=10, memo=pay_memo(PUB_NONCE))
+    topup = rpc.pay(source="buyer", dest=str(rail.pay_to), lamports=100, memo=pay_memo(PUB_NONCE))
+    await rail.monitor.poll()
+    assert rail.monitor.get(PUB_NONCE) == first
+    v = await rail.verify(proof=topup, nonce=PUB_NONCE, min_amount=100)
+    assert v.tx_hash == topup
+    # A full first payment is never displaced by a hint (hijack guard).
+    v = await rail.verify(proof=topup, nonce=PUB_NONCE, min_amount=10)
+    assert v.tx_hash == first
+
+
 async def test_verify_expired_payment_rejected():
     rpc = FakeRpc()
     rail = _rail(rpc, payment_timeout_seconds=60)
@@ -518,7 +553,7 @@ def test_settings_sol_commitment_validated(clean_env, monkeypatch):
 
 # ── /invoke end-to-end (fake RPC) ───────────────────────────────────────
 
-def _sol_app(app_factory, rpc: FakeRpc):
+def _sol_app(app_factory, rpc: FakeRpc, **overrides: Any):
     kp = Keypair()
     sku = AgentSku(
         sku_id=DEFAULT_SKU_ID, title=DEFAULT_SKU_ID,
@@ -527,6 +562,7 @@ def _sol_app(app_factory, rpc: FakeRpc):
     app = app_factory(
         skus=(sku,), payment_rails=("TON", "SOL"),
         sol_wallet_pk=json.dumps(list(bytes(kp))), sol_cluster="devnet",
+        **overrides,
     )
     assert isinstance(app.rails["SOL"], SolRail)
     app.rails["SOL"] = _rail(rpc, kp=kp)
@@ -601,20 +637,68 @@ async def test_invoke_sol_wrong_secret_never_touches_rpc(app_factory):
         assert not await app.tx_store.is_processed(f"solana:{sig}")
 
 
-async def test_invoke_sol_underpaid_returns_402(app_factory):
+async def test_invoke_sol_underpaid_queues_refund_then_topup_delivers(app_factory, monkeypatch):
+    """Underpaid: 402 + refund queued under the on-chain sig (sender/amount
+    known). The pub stays claimable, so a top-up under the same memo delivers."""
+    import api as api_module
+    from api.domain.refund_worker import _process_entry
+
+    async def fake_run(**kwargs):
+        return {"result": {"type": "text", "data": "ok"}}
+
+    monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
+    rpc = FakeRpc()
+    app = _sol_app(app_factory, rpc, rate_limit_requests=100)
+    rail = app.rails["SOL"]
+    await rail.monitor.poll()
+    buyer = Keypair().pubkey()
+    rpc.accounts[str(buyer)] = {"lamports": 1}
+    async with _serve_app(app) as c:
+        opt = await _preflight_sol_option(c)
+        claim = {"capability": "translate", "rail": "SOL",
+                 "nonce": opt["nonce"], "body": {"text": "hi"}}
+        under = rpc.pay(source=str(buyer), dest=str(rail.pay_to),
+                        lamports=1_500_000, memo=opt["memo"])
+        resp = await c.post("/invoke", json={**claim, "proof": under})
+        assert resp.status == 402
+        body = await resp.json()
+        assert body["refund_pending"] is True
+        assert (body["tx"], body["paid"], body["required"]) == (under, "1500000", "2000000")
+        entry = await app.refund_queue.get(f"solana:{under}")
+        assert (entry.sender, entry.amount, entry.rail) == (str(buyer), 1_500_000, "SOL")
+
+        # Retrying the same underpaid tx is idempotent (one queue row).
+        resp = await c.post("/invoke", json={**claim, "proof": under})
+        assert resp.status == 402
+
+        # Worker refunds it on Solana.
+        await _process_entry(app, entry)
+        assert (await app.refund_queue.get(f"solana:{under}")).status == "refunded"
+        assert len(rpc.sent) == 1
+
+        topup = rpc.pay(source=str(buyer), dest=str(rail.pay_to),
+                        lamports=2_000_000, memo=opt["memo"])
+        resp = await c.post("/invoke", json={**claim, "proof": topup})
+        assert resp.status == 200, await resp.text()
+        assert await app.tx_store.is_processed(f"solana:{topup}")
+
+
+async def test_invoke_sol_memo_without_money_is_plain_402(app_factory):
+    """Memo present but nothing paid to us: nothing to refund."""
     rpc = FakeRpc()
     app = _sol_app(app_factory, rpc)
     await app.rails["SOL"].monitor.poll()
     async with _serve_app(app) as c:
         opt = await _preflight_sol_option(c)
-        sig = rpc.pay(source="buyer", dest=str(app.rails["SOL"].pay_to),
-                      lamports=1_999_999, memo=opt["memo"])
+        sig = rpc.pay(source="buyer", dest=str(Keypair().pubkey()),
+                      lamports=2_000_000, memo=opt["memo"])
         resp = await c.post("/invoke", json={
             "capability": "translate", "rail": "SOL", "proof": sig,
             "nonce": opt["nonce"], "body": {"text": "hi"},
         })
         assert resp.status == 402
-        assert "lower" in (await resp.json())["error"]
+        assert "refund_pending" not in await resp.json()
+        assert await app.refund_queue.get(f"solana:{sig}") is None
 
 
 async def test_preflight_503_when_sol_monitor_stale(app_factory):

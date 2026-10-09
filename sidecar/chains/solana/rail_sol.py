@@ -32,7 +32,7 @@ from chains.solana.constants import (
 )
 from chains.solana.rpc import SolanaRpc
 from chains.solana.sol_monitor import SolanaPaymentMonitor, SolPayment, parse_sol_payment, pay_memo
-from payments.types import PaymentVerificationError, VerifiedPayment
+from payments.types import PaymentVerificationError, VerifiedPayment, underpaid_error
 
 logger = logging.getLogger("sidecar")
 
@@ -108,6 +108,18 @@ class SolRail:
             sig = self.monitor.get(nonce)
             if sig is not None:
                 payment = await self._fetch(sig)
+                if (
+                    payment is not None and hint is not None and hint != sig
+                    and 0 < payment.amount < min_amount
+                ):
+                    # The memo's first tx underpaid (refunded separately); the
+                    # claimant points at a top-up under the same memo.
+                    topup = await self._fetch(hint)
+                    if (
+                        topup is not None and topup.nonce == nonce
+                        and not topup.failed and topup.amount >= min_amount
+                    ):
+                        payment = topup
             elif hint is not None:
                 payment = await self._fetch(hint)
                 if payment is not None:
@@ -128,7 +140,11 @@ class SolRail:
         if payment.block_time is not None and time.time() - payment.block_time > self._payment_timeout:
             raise PaymentVerificationError("Payment session expired")
         if payment.amount <= 0 or payment.amount < min_amount:
-            raise PaymentVerificationError("Transaction amount is lower than required price")
+            raise underpaid_error(
+                tx_hash=payment.signature, sender=payment.sender,
+                recipient=str(self.pay_to), amount=payment.amount,
+                comment=payment.nonce or "", required=min_amount,
+            )
         if not payment.sender:
             raise PaymentVerificationError("Transaction sender is missing")
         return VerifiedPayment(

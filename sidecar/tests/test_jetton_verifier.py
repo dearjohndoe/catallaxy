@@ -30,6 +30,7 @@ from payments import (
     JettonPaymentVerifier,
     JettonWalletMonitor,
     PaymentVerificationError,
+    UnderpaidPayment,
 )
 
 # A valid bounceable address used for the notification body's `sender` field
@@ -160,8 +161,9 @@ async def test_jetton_verifier_amount_below_min_rejected():
     v._monitor.get = AsyncMock(return_value=entry)
     v._monitor.consume = AsyncMock()
 
-    with pytest.raises(PaymentVerificationError, match="lower than required"):
+    with pytest.raises(UnderpaidPayment, match="lower than required") as ei:
         await v.verify("tx", "n:sid-test")
+    assert (ei.value.payment.sender, ei.value.payment.amount) == ("EQpayer", 1_999_999)
     # Underpaid tx must NOT be consumed (so a later correct payment can match).
     v._monitor.consume.assert_not_called()
 

@@ -15,6 +15,7 @@ from chains.ton.transfer import payment_body, text_comment_body
 from payments import (
     NonceMeta,
     PaymentVerificationError,
+    UnderpaidPayment,
     PaymentVerifier,
     ProcessedTxStore,
     WalletMonitor,
@@ -296,8 +297,10 @@ async def test_payment_verifier_amount_below_min_rejected():
     v._monitor.get = AsyncMock(return_value=tx)
     v._monitor.consume = AsyncMock()
 
-    with pytest.raises(PaymentVerificationError, match="lower than required"):
+    with pytest.raises(UnderpaidPayment, match="lower than required") as ei:
         await v.verify("tx", "n")
+    assert (ei.value.payment.sender, ei.value.payment.amount) == ("EQsender", 9_999)
+    assert ei.value.payment.tx_hash != "tx"  # on-chain hash, not client proof
     v._monitor.consume.assert_not_called()
 
 

@@ -10,7 +10,7 @@ from aiohttp import web
 
 from chains.base import ChainRail, chain_for_rail, namespaced_pub_key, namespaced_tx_key
 from chains.solana.x402 import encode_payment_required_header, payment_required_body
-from payments import PaymentVerificationError, mint_nonce, pub_from_nonce
+from payments import PaymentVerificationError, UnderpaidPayment, mint_nonce, pub_from_nonce
 from settings import AgentSku
 
 from api.http.responses import render_done_response
@@ -352,8 +352,10 @@ async def verify_payment(
         return await sidecar.rails["TON"].verify(
             proof=parsed.tx_hash, nonce=parsed.nonce, min_amount=min_ton,
         )
+    except UnderpaidPayment as exc:
+        return await _refund_underpaid(parsed, sku, sidecar, exc)
     except PaymentVerificationError as exc:
-        # Verifier saw on-chain state and rejected: tx not found, wrong amount,
+        # Verifier saw on-chain state and rejected: tx not found, expired,
         # wrong recipient. Money may not exist — don't refund, let user fix.
         unlock_quote(parsed.quote_id, sidecar)
         return web.json_response({"error": str(exc)}, status=402)
@@ -367,6 +369,50 @@ async def verify_payment(
             sender=None, amount=None,
             reason="verifier_error",
         )
+
+
+async def _refund_underpaid(
+    parsed: "ParsedInvoke", sku: AgentSku, sidecar: "SidecarApp", exc: UnderpaidPayment,
+) -> web.Response:
+    """Real payment for this nonce, but below price: queue it for refund.
+
+    Keyed by the verified on-chain tx (``{chain}:{tx_hash}``), NOT by pub:
+    the pub stays claimable so a full top-up under the same memo can still be
+    delivered, while a retried claim of this same tx re-enqueues idempotently.
+    The tx can never also be delivered — it is below price on every verify.
+    """
+    unlock_quote(parsed.quote_id, sidecar)
+    paid = exc.payment
+    queue_key = namespaced_tx_key(chain_for_rail(parsed.rail), paid.tx_hash)
+    try:
+        await sidecar.refund_queue.enqueue(
+            tx_hash=queue_key, nonce=parsed.nonce, rail=parsed.rail,
+            sender=paid.sender, amount=paid.amount, sku_id=sku.sku_id,
+        )
+    except Exception:
+        logger.exception(
+            "underpaid refund enqueue failed tx=%s key=%s — manual reconciliation needed",
+            paid.tx_hash, queue_key,
+        )
+    logger.warning(
+        "underpaid payment queued for refund rail=%s tx=%s paid=%s required=%s",
+        parsed.rail, paid.tx_hash, paid.amount, exc.required,
+    )
+    if sidecar.owner_bot is not None:
+        sidecar.owner_bot.notify_refund(
+            sender=paid.sender, amount=paid.amount, rail=parsed.rail, sku_id=sku.sku_id,
+            tx_hash=paid.tx_hash, reason="underpaid", refund_tx=None, status="refund_pending",
+        )
+    return web.json_response(
+        {
+            "error": str(exc),
+            "refund_pending": True,
+            "tx": paid.tx_hash,
+            "paid": str(paid.amount),
+            "required": str(exc.required),
+        },
+        status=402,
+    )
 
 
 async def claim_stock(

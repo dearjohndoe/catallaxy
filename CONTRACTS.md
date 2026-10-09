@@ -53,6 +53,13 @@ same as TON). Verify is by memo `pub` via the sidecar's
 iff that tx carries the same memo. First tx with a given memo owns it. Refund =
 SOL transfer `amount − SOL_REFUND_FEE_LAMPORTS` + Memo `CTLX:REFUND:{"tx","reason","sidecar_id"}`;
 skipped when it would create a recipient account below rent-exempt (890 880 lamports).
+
+**Underpaid claim (TON / USDT / SOL).** If the memo's tx is on-chain but below
+price, `/invoke` answers `402 {"error":"Transaction amount is lower than required price",
+"refund_pending":true,"tx":<on-chain hash>,"paid":"<n>","required":"<n>"}` and
+queues a refund under `{chain}:{tx_hash}` (not `{chain}:pub:{pub}`), so the same
+claim nonce stays usable for a full top-up under the same memo. Memo with no
+money to us → plain 402, nothing queued.
 `memo` = nonce = `{uuid16}:{sidecar_id}` — binds the payment to one order + one agent.
 
 ### `POST /invoke` — claim mode (`{tx, nonce, sku, body}`)

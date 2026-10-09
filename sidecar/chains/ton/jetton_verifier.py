@@ -11,7 +11,7 @@ from .jetton_monitor import JettonWalletMonitor
 from payments.nonce import parse_nonce
 from .remote_monitor import RemoteJettonWalletMonitor, _RelayClient, get_relay_url
 from payments.tonapi_client import TonAPIClient
-from payments.types import PaymentVerificationError, VerifiedPayment
+from payments.types import PaymentVerificationError, VerifiedPayment, underpaid_error
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +142,11 @@ class JettonPaymentVerifier:
                     raise PaymentVerificationError("Payment session expired")
 
                 if entry.amount < required_amount:
-                    raise PaymentVerificationError("Transaction amount is lower than required price")
+                    raise underpaid_error(
+                        tx_hash=entry.tx.cell.hash.hex(), sender=entry.sender or "",
+                        recipient=self._agent_wallet, amount=entry.amount,
+                        comment=entry.nonce, required=required_amount,
+                    )
 
                 if not entry.sender:
                     raise PaymentVerificationError("Transaction sender is missing")

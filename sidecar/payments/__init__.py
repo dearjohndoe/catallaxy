@@ -4,6 +4,7 @@ _apply_mark_error_patch()
 
 from .types import (
     PaymentVerificationError,
+    UnderpaidPayment,
     VerifiedPayment,
     NonceMeta,
     JettonPaymentTx,
@@ -38,6 +39,7 @@ from .tonapi_client import TonAPIClient, TonAPIError, TonAPIRateLimitError
 
 __all__ = [
     "PaymentVerificationError",
+    "UnderpaidPayment",
     "VerifiedPayment",
     "NonceMeta",
     "JettonPaymentTx",
