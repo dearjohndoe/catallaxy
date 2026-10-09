@@ -137,3 +137,18 @@ class SolanaRpc:
             }],
         )
         return result if isinstance(result, dict) else None
+
+    async def get_token_account_balance(self, token_account: str) -> int | None:
+        """Raw base units, or None when the token account does not exist."""
+        try:
+            result = await self.call(
+                "getTokenAccountBalance", [token_account, {"commitment": "confirmed"}],
+            )
+        except SolanaRpcError as exc:
+            if "could not find account" in str(exc).lower() or "-32602" in str(exc):
+                return None
+            raise
+        value = (result or {}).get("value") if isinstance(result, dict) else None
+        if not isinstance(value, dict) or value.get("amount") is None:
+            return None
+        return int(value["amount"])

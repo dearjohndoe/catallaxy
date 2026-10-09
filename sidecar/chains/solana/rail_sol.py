@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import logging
 import time
 from typing import Any, Callable
@@ -26,10 +25,10 @@ from solders.compute_budget import set_compute_unit_limit, set_compute_unit_pric
 
 from chains.solana.constants import (
     MEMO_PROGRAM,
-    REFUND_MEMO_PREFIX,
     RENT_EXEMPT_MIN_LAMPORTS,
     SIGNATURE_FEE_LAMPORTS,
 )
+from chains.solana.refunds import find_refund_signature, refund_memo
 from chains.solana.rpc import SolanaRpc
 from chains.solana.sol_monitor import SolanaPaymentMonitor, SolPayment, parse_sol_payment, pay_memo
 from payments.types import PaymentVerificationError, VerifiedPayment, underpaid_error
@@ -43,14 +42,6 @@ def _looks_like_signature(value: str) -> bool:
         return True
     except Exception:
         return False
-
-
-def refund_memo(original_tx_hash: str, reason: str, sidecar_id: str) -> str:
-    """Same JSON body as the TON refund cell, so one scanner reads both."""
-    return REFUND_MEMO_PREFIX + json.dumps(
-        {"tx": original_tx_hash, "reason": reason, "sidecar_id": sidecar_id},
-        separators=(",", ":"),
-    )
 
 
 class SolRail:
@@ -231,20 +222,14 @@ class SolRail:
 
     async def find_existing_refund(self, original_tx_hash: str) -> str | None:
         """Signature of a refund we already sent for ``original_tx_hash``."""
-        needle = json.dumps(original_tx_hash)
-        rows = await self._rpc.get_signatures_for_address(
-            str(self.pay_to), limit=200, commitment=self._commitment,
+        return await find_refund_signature(
+            self._rpc, str(self.pay_to), original_tx_hash, commitment=self._commitment,
         )
-        for row in rows:
-            memo = row.get("memo")
-            if row.get("err") is None and isinstance(memo, str) and REFUND_MEMO_PREFIX in memo and needle in memo:
-                return row["signature"]
-        return None
 
     async def _send_sol(self, to: str, lamports: int, memo: str) -> str:
         dest = Pubkey.from_string(to)
         ixs = [
-            set_compute_unit_limit(30_000),
+            set_compute_unit_limit(100_000),  # memo cost grows with length
             set_compute_unit_price(1),
             transfer(TransferParams(from_pubkey=self.pay_to, to_pubkey=dest, lamports=lamports)),
             Instruction(MEMO_PROGRAM, memo.encode(), [AccountMeta(self.pay_to, True, False)]),

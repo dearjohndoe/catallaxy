@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import struct
-from typing import Any
+from typing import Any, Callable
 
 from solders.hash import Hash
 from solders.instruction import AccountMeta, Instruction
@@ -18,11 +19,16 @@ from solders.system_program import ID as SYSTEM_PROGRAM
 
 from chains.solana.constants import (
     ASSOCIATED_TOKEN_PROGRAM,
+    MEMO_PROGRAM,
+    RENT_EXEMPT_MIN_LAMPORTS,
+    SIGNATURE_FEE_LAMPORTS,
+    TOKEN_ACCOUNT_RENT_LAMPORTS,
     TOKEN_PROGRAM,
     USDC_MINT_DEVNET,
     USDC_MINT_MAINNET,
 )
 from chains.solana.exact import ExactSettler, InspectedExactPayment, inspect_exact
+from chains.solana.refunds import find_refund_signature, refund_memo
 from chains.solana.rpc import SolanaRpc
 from chains.solana.x402 import cluster_caip2, exact_requirements
 from payments.types import VerifiedPayment
@@ -41,6 +47,7 @@ class UsdcRail:
         cluster: str,
         mint: str | None = None,
         settler: ExactSettler | None = None,
+        get_sidecar_id: Callable[[], str] = lambda: "",
     ) -> None:
         self._kp = keypair
         self._rpc = rpc
@@ -51,6 +58,7 @@ class UsdcRail:
         )
         self.pay_to = keypair.pubkey()
         self._settler = settler or ExactSettler(keypair=keypair, rpc=rpc)
+        self._get_sidecar_id = get_sidecar_id
 
     @property
     def fee_payer(self) -> str:
@@ -81,7 +89,8 @@ class UsdcRail:
             logger.warning("USDC refund skipped: amount <= 0 tx=%s", original_tx_hash)
             return None
         try:
-            return await self._send_usdc(to, amount)
+            memo = refund_memo(original_tx_hash, reason, self._get_sidecar_id())
+            return await self._send_usdc(to, amount, memo)
         except Exception:
             logger.exception("Failed to send USDC refund tx=%s", original_tx_hash)
             return None
@@ -121,12 +130,30 @@ class UsdcRail:
     async def close(self) -> None:
         await self._rpc.close()
 
-    async def _send_usdc(self, owner_b58: str, amount: int) -> str:
+    # ── refund-worker hooks (rail-generic in refund_worker) ──────────────
+
+    async def check_refund_balance(self, amount: int) -> tuple[bool, str]:
+        """Seller USDC ATA must hold ``amount``; seller SOL must cover the tx
+        fee plus a possible buyer-ATA creation while staying rent-exempt."""
+        src = get_associated_token_address(self.pay_to, self.mint, TOKEN_PROGRAM)
+        usdc = await self._rpc.get_token_account_balance(str(src))
+        if usdc is None or usdc < amount:
+            return False, f"USDC balance {usdc or 0} < required {amount}"
+        lamports = await self._rpc.get_balance(str(self.pay_to))
+        need = SIGNATURE_FEE_LAMPORTS + TOKEN_ACCOUNT_RENT_LAMPORTS + RENT_EXEMPT_MIN_LAMPORTS
+        if lamports < need:
+            return False, f"SOL balance {lamports} < required {need} for USDC refund fees"
+        return True, ""
+
+    async def find_existing_refund(self, original_tx_hash: str) -> str | None:
+        return await find_refund_signature(self._rpc, str(self.pay_to), original_tx_hash)
+
+    async def _send_usdc(self, owner_b58: str, amount: int, memo: str | None = None) -> str:
         dest_owner = Pubkey.from_string(owner_b58)
         src = get_associated_token_address(self.pay_to, self.mint, TOKEN_PROGRAM)
         dest = get_associated_token_address(dest_owner, self.mint, TOKEN_PROGRAM)
         ixs: list[Instruction] = [
-            set_compute_unit_limit(50_000),
+            set_compute_unit_limit(100_000),  # ATA create + transfer + memo
             set_compute_unit_price(1),
         ]
         dest_info = await self._rpc.get_account_info(str(dest))
@@ -158,11 +185,12 @@ class UsdcRail:
                 ],
             )
         )
+        if memo:
+            ixs.append(Instruction(MEMO_PROGRAM, memo.encode(), [AccountMeta(self.pay_to, True, False)]))
         blockhash_s, _ = await self._rpc.get_latest_blockhash()
         msg = MessageV0.try_compile(
             self.pay_to, ixs, [], Hash.from_string(blockhash_s),
         )
         tx = VersionedTransaction(msg, [self._kp])
-        import base64
         sig = await self._rpc.send_transaction(base64.b64encode(bytes(tx)).decode("ascii"))
         return sig

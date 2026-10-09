@@ -813,3 +813,81 @@ async def test_refund_worker_recovers_and_refunds_sol(app_factory):
         await app.refund_queue.close()
         await app.tx_store.close()
 
+
+# ── USDC rail: refund-worker hooks ──────────────────────────────────────
+
+def _usdc_rail(rpc: FakeRpc, kp: Keypair | None = None):
+    from chains.solana.rail_usdc import UsdcRail
+    return UsdcRail(keypair=kp or Keypair(), rpc=rpc, cluster="devnet",  # type: ignore[arg-type]
+                    get_sidecar_id=lambda: SID)
+
+
+def _with_token_balance(rpc: FakeRpc, amount: int | None) -> None:
+    async def bal(_acct):
+        return amount
+    rpc.get_token_account_balance = bal  # type: ignore[attr-defined]
+
+
+async def test_usdc_check_refund_balance():
+    from chains.solana.constants import TOKEN_ACCOUNT_RENT_LAMPORTS
+    rpc = FakeRpc()
+    rail = _usdc_rail(rpc)
+    _with_token_balance(rpc, 1_000_000)
+    rpc.balance = 5_000 + TOKEN_ACCOUNT_RENT_LAMPORTS + RENT_EXEMPT_MIN_LAMPORTS
+    assert await rail.check_refund_balance(1_000_000) == (True, "")
+    ok, err = await rail.check_refund_balance(1_000_001)
+    assert not ok and "USDC balance" in err
+    _with_token_balance(rpc, None)  # seller ATA missing
+    assert (await rail.check_refund_balance(1))[0] is False
+    _with_token_balance(rpc, 10**9)
+    rpc.balance -= 1
+    ok, err = await rail.check_refund_balance(1)
+    assert not ok and "SOL balance" in err
+
+
+async def test_usdc_refund_carries_refund_memo_and_is_found_for_dedup():
+    rpc = FakeRpc()
+    kp = Keypair()
+    rail = _usdc_rail(rpc, kp)
+    buyer = str(Keypair().pubkey())
+    sig = await rail.refund(buyer, 1_000, original_tx_hash="solana:abc", reason="agent_failed")
+    assert sig is not None
+    msg = _decode_sent(rpc.sent[0]).message
+    keys = list(msg.account_keys)
+    memos = [bytes(ix.data).decode() for ix in msg.instructions
+             if keys[ix.program_id_index] == MEMO_PROGRAM]
+    assert memos == [refund_memo("solana:abc", "agent_failed", SID)]
+    rpc.rows.insert(0, {"signature": sig, "err": None, "memo": f"[80] {memos[0]}"})
+    assert await rail.find_existing_refund("solana:abc") == sig
+    assert await rail.find_existing_refund("solana:other") is None
+
+
+async def test_refund_worker_usdc_never_touches_ton(app_factory, monkeypatch):
+    """Balance check + send go through the USDC rail, not the TON liteserver."""
+    import api.domain.refund_worker as rw
+    from tonutils.clients import LiteBalancer
+
+    def no_ton(*a, **k):
+        raise AssertionError("TON liteserver used for a USDC refund")
+
+    monkeypatch.setattr(LiteBalancer, "from_network_config", no_ton)
+    monkeypatch.setattr(rw, "_acquire_lite_client", no_ton)
+    kp = Keypair()
+    sku = AgentSku(sku_id=DEFAULT_SKU_ID, title=DEFAULT_SKU_ID, price_ton=1_000_000,
+                   price_usd=None, initial_stock=None, price_usdc=1_000_000)
+    app = app_factory(skus=(sku,), payment_rails=("TON", "USDC"),
+                      sol_wallet_pk=json.dumps(list(bytes(kp))), sol_cluster="devnet")
+    rpc = FakeRpc()
+    _with_token_balance(rpc, 10**9)
+    app.rails["USDC"] = _usdc_rail(rpc, kp)
+    key = "solana:usdc-identity"
+    try:
+        await app.refund_queue.enqueue(tx_hash=key, nonce="sig", rail="USDC",
+                                       sender=str(Keypair().pubkey()), amount=1_000_000)
+        await rw._process_entry(app, await app.refund_queue.get(key))
+        assert (await app.refund_queue.get(key)).status == "refunded"
+        assert len(rpc.sent) == 1
+    finally:
+        await app.refund_queue.close()
+        await app.tx_store.close()
+

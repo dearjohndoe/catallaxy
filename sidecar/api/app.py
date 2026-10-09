@@ -144,6 +144,7 @@ class SidecarApp:
                     rpc=SolanaRpc(settings.sol_rpc_url or ""),
                     cluster=settings.sol_cluster,
                     mint=settings.sol_usdc_mint,
+                    get_sidecar_id=lambda: self.sidecar_id,
                 )
             if "SOL" in sol_rails:
                 self.rails["SOL"] = SolRail(

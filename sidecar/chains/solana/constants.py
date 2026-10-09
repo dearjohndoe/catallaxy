@@ -38,3 +38,6 @@ REFUND_MEMO_PREFIX = "CTLX:REFUND:"
 # leaves a new/drained account below this fails on-chain.
 RENT_EXEMPT_MIN_LAMPORTS = 890_880
 SIGNATURE_FEE_LAMPORTS = 5_000
+# Rent-exempt deposit for a 165-byte SPL token account (refund may create the
+# buyer's USDC ATA, paid by the seller).
+TOKEN_ACCOUNT_RENT_LAMPORTS = 2_039_280
