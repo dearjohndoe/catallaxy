@@ -242,6 +242,8 @@ def test_parse_sol_payment_counts_cpi_transfer_from_smart_wallet():
 
 
 def test_parse_sol_payment_counts_direct_lamport_move_without_transfer_ix():
+    """E.g. closing a wSOL account to the seller: the program-owned account
+    drops most, but the refund must go to the signer, not to that account."""
     seller, payer, program_acct = (str(Keypair().pubkey()) for _ in range(3))
     tx = _parsed_tx(
         source=payer, dest=seller, lamports=0, memo=pay_memo(PUB_NONCE),
@@ -249,7 +251,7 @@ def test_parse_sol_payment_counts_direct_lamport_move_without_transfer_ix():
         lamport_moves={program_acct: -3_000_000, seller: 3_000_000},
     )
     p = parse_sol_payment(tx, signature="S", pay_to=seller)
-    assert (p.amount, p.sender) == (3_000_000, program_acct)
+    assert (p.amount, p.sender) == (3_000_000, payer)
 
 
 def test_parse_sol_payment_reads_memo_from_cpi():

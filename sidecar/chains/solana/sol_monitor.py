@@ -52,13 +52,17 @@ class SolPayment:
     failed: bool         # meta.err set — tx landed but did not execute
 
 
-def _account_keys(message: dict[str, Any]) -> list[str]:
+def _account_keys(message: dict[str, Any]) -> tuple[list[str], set[str]]:
     """jsonParsed ``accountKeys`` (incl. lookup-table loads) as base58 strings,
-    index-aligned with ``meta.preBalances`` / ``postBalances``."""
+    index-aligned with ``meta.preBalances`` / ``postBalances``, plus signers."""
     keys: list[str] = []
+    signers: set[str] = set()
     for k in message.get("accountKeys") or []:
-        keys.append(str(k.get("pubkey") if isinstance(k, dict) else k))
-    return keys
+        key = str(k.get("pubkey") if isinstance(k, dict) else k)
+        keys.append(key)
+        if isinstance(k, dict) and k.get("signer"):
+            signers.add(key)
+    return keys, signers
 
 
 def _all_instructions(tx: dict[str, Any], message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -80,13 +84,15 @@ def parse_sol_payment(tx: dict[str, Any], *, signature: str, pay_to: str) -> Sol
     without our key — the delta is exactly what we received.
 
     ``sender`` (refund target) is the source of the first transfer to us,
-    top-level or CPI; failing that, the account whose balance dropped most.
+    top-level or CPI; failing that (a program moved lamports directly, e.g.
+    closing a wSOL account to us) the signer whose balance dropped most — never
+    a program-owned account, which nobody could spend a refund from.
     ``nonce`` comes from the first ``CTLX:PAY`` memo, top-level or CPI — one
     tx pays for one purchase.
     """
     meta = tx.get("meta") or {}
     message = ((tx.get("transaction") or {}).get("message")) or {}
-    keys = _account_keys(message)
+    keys, signers = _account_keys(message)
     pre = meta.get("preBalances") or []
     post = meta.get("postBalances") or []
 
@@ -112,7 +118,8 @@ def parse_sol_payment(tx: dict[str, Any], *, signature: str, pay_to: str) -> Sol
         if parsed.get("type") in ("transfer", "transferWithSeed") and info.get("destination") == pay_to:
             sender = str(info.get("source") or "")
     if not sender and amount > 0:
-        drops = [(delta(i), k) for i, k in enumerate(keys) if k != pay_to and delta(i) < 0]
+        drops = [(delta(i), k) for i, k in enumerate(keys)
+                 if k != pay_to and k in signers and delta(i) < 0]
         if drops:
             sender = min(drops)[1]
     return SolPayment(
