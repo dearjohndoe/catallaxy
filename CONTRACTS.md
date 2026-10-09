@@ -26,6 +26,10 @@ Response `402` (`_invoke_helpers.py:80`):
   "payment_options": [ … ] }
 ```
 plus headers `x-ton-pay-address`, `x-ton-pay-amount`, `x-ton-pay-nonce`.
+When the SKU prices Solana USDC, the same 402 also carries x402 v2
+`PAYMENT-REQUIRED` (base64 JSON) and `accepts[]` in the body. Claim is
+`PAYMENT-SIGNATURE` / `X-PAYMENT` with a partially-signed TransferChecked;
+the sidecar is the fee payer and publishes. No split-nonce on that path.
 
 **`payment_option`** — one per rail:
 ```json
@@ -34,6 +38,10 @@ plus headers `x-ton-pay-address`, `x-ton-pay-amount`, `x-ton-pay-nonce`.
 // USDT (rail_usdt.py:69) — same + token block
 { "rail":"USDT", "address":"<agent_wallet>", "amount":"<micro-usdt>", "memo":"<nonce>",
   "token":{"symbol":"USDT","master":"<jetton_master>","decimals":6}, "sku":"<sku_id>" }
+// USDC (rail_usdc.py) — Solana x402 exact; ``memo`` unused by x402 clients
+{ "rail":"USDC", "address":"<sol_pubkey>", "amount":"<micro-usdc>", "memo":"<nonce>",
+  "token":{"symbol":"USDC","mint":"<mint>","decimals":6},
+  "network":"solana:…", "extra":{"feePayer":"<sol_pubkey>"}, "sku":"<sku_id>" }
 ```
 `memo` = nonce = `{uuid16}:{sidecar_id}` — binds the payment to one order + one agent.
 

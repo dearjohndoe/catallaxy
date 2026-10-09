@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 from chains.base import ChainRail, chain_for_rail, namespaced_pub_key, namespaced_tx_key
+from chains.solana.x402 import encode_payment_required_header, payment_required_body
 from payments import PaymentVerificationError, mint_nonce, pub_from_nonce
 from settings import AgentSku
 
@@ -80,7 +81,7 @@ async def enqueue_refund_after_payment(
     ``mark_processed`` has already run but service was NOT delivered.
     """
     unlock_quote(parsed.quote_id, sidecar)
-    queue_key = payment_identity_key(parsed.rail, parsed.nonce)
+    queue_key = parsed.identity or payment_identity_key(parsed.rail, parsed.nonce)
     if queue_key is None:
         # Should be unreachable after split-nonce rebind; never fall back to
         # client tx (that was the refund+goods split).
@@ -151,6 +152,8 @@ async def build_402_response(
         priced.append((sidecar.rails["TON"], min_ton))
     if eff_usd and min_usdt:
         priced.append((sidecar.rails["USDT"], min_usdt))
+    if sku.price_usdc and "USDC" in sidecar.rails:
+        priced.append((sidecar.rails["USDC"], sku.price_usdc))
 
     unhealthy_rails = [r.rail_id for r, _ in priced if not r.monitor_healthy(max_age)]
     if unhealthy_rails:
@@ -232,6 +235,25 @@ async def build_402_response(
         # header-only client has no way to claim under the split-nonce
         # scheme (it never sees `sec`); see PROTOCOL.md §5.
         headers["x-ton-pay-nonce"] = pub_nonce
+
+    usdc_opts = [o for o in payment_options if o.get("rail") == "USDC"]
+    if usdc_opts and "USDC" in sidecar.rails:
+        usdc_rail = sidecar.rails["USDC"]
+        accepts = [
+            usdc_rail.x402_accepts_entry(
+                sku.price_usdc or 0,
+                resource_url=sidecar.settings.agent_endpoint,
+                description=sidecar.settings.agent_description,
+            )
+        ]
+        x402_body = payment_required_body(
+            accepts,
+            resource_url=sidecar.settings.agent_endpoint,
+            description=sidecar.settings.agent_description,
+        )
+        resp_body["accepts"] = accepts
+        resp_body["x402Version"] = 2
+        headers["PAYMENT-REQUIRED"] = encode_payment_required_header(x402_body)
 
     return web.json_response(resp_body, status=402, headers=headers)
 
@@ -363,7 +385,10 @@ async def claim_stock(
         refund_tx: str | None = None
         refund_send_failed = False
         try:
-            oos_key = payment_identity_key(parsed.rail, parsed.nonce)
+            oos_key = (
+                parsed.identity
+                or payment_identity_key(parsed.rail, parsed.nonce)
+            )
             if oos_key is None:
                 oos_key = namespaced_tx_key(
                     chain_for_rail(parsed.rail), verified_payment.tx_hash,

@@ -150,6 +150,12 @@ async def shutdown(app: "SidecarApp") -> None:
         task.cancel()
     await asyncio.gather(*app.background_tasks, return_exceptions=True)
     await app.sender.close()
+    usdc = app.rails.get("USDC")
+    if usdc is not None and hasattr(usdc, "close"):
+        try:
+            await usdc.close()
+        except Exception:
+            logger.exception("USDC rail close failed")
     await app.verifier.close()
     if app.jetton_verifier:
         await app.jetton_verifier.close()

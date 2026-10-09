@@ -16,7 +16,7 @@ from payments.types import VerifiedPayment
 # (canonical after verify) and ``{chain}:pub:{pub}`` (claim-block identity).
 # refund_queue PK and the refund memo's "tx" field are ``{chain}:pub:{pub}``.
 # Both TON rails settle on "ton".
-_RAIL_TO_CHAIN = {"TON": "ton", "USDT": "ton"}
+_RAIL_TO_CHAIN = {"TON": "ton", "USDT": "ton", "USDC": "solana"}
 
 
 def chain_for_rail(rail_id: str) -> str:

@@ -16,6 +16,7 @@ from payments import PaymentVerifier, JettonPaymentVerifier, ProcessedTxStore, R
 from chains.base import ChainRail
 from chains.ton.rail_ton import TonRail
 from chains.ton.rail_usdt import UsdtRail
+from chains.solana.rail_usdc import UsdcRail
 from owner_bot import OwnerBot
 from settings import Settings, AgentSku, DEFAULT_SKU_ID  # noqa: F401 — re-exported via api package
 from stock import StockStore
@@ -130,6 +131,16 @@ class SidecarApp:
                 get_sidecar_id=lambda: self.sidecar_id,
             ),
         }
+        if settings.sol_wallet_pk and "USDC" in settings.payment_rails:
+            from chains.solana.rpc import SolanaRpc
+            from chains.solana.wallet import parse_solana_keypair
+            sol_kp = parse_solana_keypair(settings.sol_wallet_pk)
+            self.rails["USDC"] = UsdcRail(
+                keypair=sol_kp,
+                rpc=SolanaRpc(settings.sol_rpc_url or ""),
+                cluster=settings.sol_cluster,
+                mint=settings.sol_usdc_mint,
+            )
 
     async def refund_user(
         self, recipient: str, payment_amount: int, original_tx_hash: str, reason: str, rail: str = "TON",

@@ -537,3 +537,30 @@ def test_sku_prices_includes_dynamic_sentinel_zero():
     # 0 is the dynamic-pricing sentinel — present (priced), distinct from None.
     assert _sku(0, None).prices == {"TON": 0}
     assert _sku(0, None).price_for("TON") == 0
+
+
+def test_sku_price_usdc_rail():
+    from settings import AgentSku, DEFAULT_SKU_ID
+    sku = AgentSku(
+        sku_id=DEFAULT_SKU_ID, title="t",
+        price_ton=None, price_usd=None, initial_stock=None, price_usdc=10_000,
+    )
+    assert sku.price_for("USDC") == 10_000
+    assert sku.prices == {"USDC": 10_000}
+
+
+def test_parse_skus_usdc_requires_sol_wallet(clean_env, monkeypatch):
+    from solders.keypair import Keypair
+    _apply_required(monkeypatch)
+    monkeypatch.delenv("AGENT_PRICE", raising=False)
+    monkeypatch.setenv("AGENT_SKUS", "basic:inf:usdc=10000")
+    with pytest.raises(RuntimeError, match="SOL_WALLET_PK"):
+        load_settings(env_file="/nonexistent/.env")
+    kp = Keypair()
+    monkeypatch.setenv("SOL_WALLET_PK", kp.to_json())
+    monkeypatch.setenv("SOL_CLUSTER", "devnet")
+    s = load_settings(env_file="/nonexistent/.env")
+    assert s.payment_rails == ("USDC",)
+    assert s.skus[0].price_usdc == 10_000
+    assert s.sol_wallet == str(kp.pubkey())
+    assert s.sol_cluster == "devnet"

@@ -2,3 +2,4 @@ aiohttp==3.11.18
 python-dotenv>=1.0.1,<2
 aiosqlite==0.20.0
 tonutils==2.0.4
+solders>=0.26,<0.27

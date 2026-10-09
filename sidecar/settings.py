@@ -48,19 +48,28 @@ class AgentSku:
     price_usd: int | None   # micro-USD, None if USDT rail not supported
     initial_stock: int | None  # None => infinite (no stock tracking)
     kind: SkuKind = SkuKind.STATIC
+    price_usdc: int | None = None  # micro-USDC on Solana; None if rail off
 
     # rail_id -> price accessors over the price_ton/price_usd backing fields, so
     # rail-agnostic code needn't branch on "TON"/"USDT".
     def price_for(self, rail_id: str) -> int | None:
-        """Price on ``rail_id`` (nanoton for TON, micro-USD for USDT), or None
+        """Price on ``rail_id`` (nanoton for TON, micro-USD for USDT / USDC), or None
         if the rail isn't priced. A price of 0 is the dynamic-pricing sentinel."""
-        return {"TON": self.price_ton, "USDT": self.price_usd}.get(rail_id)
+        return {
+            "TON": self.price_ton,
+            "USDT": self.price_usd,
+            "USDC": self.price_usdc,
+        }.get(rail_id)
 
     @property
     def prices(self) -> dict[str, int]:
         """rail_id -> price for every priced rail (unpriced rails omitted)."""
         return {
-            r: p for r, p in (("TON", self.price_ton), ("USDT", self.price_usd))
+            r: p for r, p in (
+                ("TON", self.price_ton),
+                ("USDT", self.price_usd),
+                ("USDC", self.price_usdc),
+            )
             if p is not None
         }
 
@@ -114,6 +123,12 @@ class Settings:
     # TEP-74 minter — then also set TON_JETTON_WALLET_CODE.
     usdt_master: str = USDT_MASTER_MAINNET
     jetton_wallet_code_hex: str | None = None
+    sol_wallet_pk: str | None = None
+    sol_wallet: str | None = None
+    sol_rpc_url: str | None = None
+    sol_cluster: str = "mainnet"
+    sol_usdc_mint: str | None = None
+    agent_price_usdc: int | None = None
 
     @property
     def capability(self) -> str:
@@ -170,7 +185,9 @@ def _derive_wallet_address(pk_hex: str, testnet: bool) -> str:
     )
 
 
-def _parse_sku_prices(price_spec: list[str], sku_id: str) -> tuple[int | None, int | None, SkuKind]:
+def _parse_sku_prices(
+    price_spec: list[str], sku_id: str,
+) -> tuple[int | None, int | None, int | None, SkuKind]:
     """Parse price tokens like ['ton=1000000000', 'usd=1500000'].
 
     Special forms:
@@ -187,10 +204,11 @@ def _parse_sku_prices(price_spec: list[str], sku_id: str) -> tuple[int | None, i
     if any(t.lower() == "free" for t in tokens):
         if len(tokens) != 1:
             raise RuntimeError(f"SKU '{sku_id}': 'free' cannot be combined with other price tokens")
-        return None, None, SkuKind.FREE
+        return None, None, None, SkuKind.FREE
 
     price_ton: int | None = None
     price_usd: int | None = None
+    price_usdc: int | None = None
     for token in tokens:
         if "=" not in token:
             raise RuntimeError(f"SKU '{sku_id}': invalid price token '{token}' (expected ton=<n> or usd=<n>)")
@@ -212,11 +230,15 @@ def _parse_sku_prices(price_spec: list[str], sku_id: str) -> tuple[int | None, i
             price_ton = ival
         elif key == "usd":
             price_usd = ival
+        elif key == "usdc":
+            if ival == 0:
+                raise RuntimeError(f"SKU '{sku_id}': usdc dynamic pricing is not supported")
+            price_usdc = ival
         else:
-            raise RuntimeError(f"SKU '{sku_id}': unknown price key '{key}' (use ton or usd)")
+            raise RuntimeError(f"SKU '{sku_id}': unknown price key '{key}' (use ton, usd, or usdc)")
 
-    if price_ton is None and price_usd is None:
-        raise RuntimeError(f"SKU '{sku_id}': at least one of ton/usd price required")
+    if price_ton is None and price_usd is None and price_usdc is None:
+        raise RuntimeError(f"SKU '{sku_id}': at least one of ton/usd/usdc price required")
 
     # Any priced rail at 0 is the dynamic-pricing sentinel: that rail's price is
     # resolved at runtime via mode=prices. A SKU may mix a fixed rail with a
@@ -225,7 +247,7 @@ def _parse_sku_prices(price_spec: list[str], sku_id: str) -> tuple[int | None, i
     # rub_anchored) is just the all-dynamic special case of this rule.
     kind = SkuKind.DYNAMIC if price_ton == 0 or price_usd == 0 else SkuKind.STATIC
 
-    return price_ton, price_usd, kind
+    return price_ton, price_usd, price_usdc, kind
 
 
 def _parse_tg_user_ids(raw: str) -> tuple[int, ...]:
@@ -297,12 +319,13 @@ def _parse_skus(raw_skus: str, raw_titles: str) -> tuple[AgentSku, ...]:
             if initial_stock < 0:
                 raise RuntimeError(f"SKU '{sku_id}': stock must be >= 0")
 
-        price_ton, price_usd, kind = _parse_sku_prices(parts[2:], sku_id)
+        price_ton, price_usd, price_usdc, kind = _parse_sku_prices(parts[2:], sku_id)
         title = titles.get(sku_id) or sku_id
         skus.append(AgentSku(
             sku_id=sku_id, title=title,
             price_ton=price_ton, price_usd=price_usd,
             initial_stock=initial_stock, kind=kind,
+            price_usdc=price_usdc,
         ))
 
     if not skus:
@@ -311,7 +334,7 @@ def _parse_skus(raw_skus: str, raw_titles: str) -> tuple[AgentSku, ...]:
     # All paid SKUs must share the same rail set. FREE SKUs have no rails and are
     # excluded so they can coexist with paid SKUs.
     rail_sets = {
-        tuple(sorted([r for r, v in (("TON", s.price_ton), ("USD", s.price_usd)) if v is not None]))
+        tuple(sorted([r for r, v in (("TON", s.price_ton), ("USD", s.price_usd), ("USDC", s.price_usdc)) if v is not None]))
         for s in skus if s.kind is not SkuKind.FREE
     }
     if len(rail_sets) > 1:
@@ -397,6 +420,42 @@ def load_settings(env_file: str | None = None) -> Settings:
         rails.append("TON")
     if base is not None and base.price_usd is not None:
         rails.append("USDT")
+    agent_price_usdc: int | None = None
+    if base is not None and base.price_usdc is not None:
+        rails.append("USDC")
+        non_zero_usdc = [s.price_usdc for s in skus if s.kind is not SkuKind.FREE and s.price_usdc]
+        agent_price_usdc = min(non_zero_usdc) if non_zero_usdc else base.price_usdc
+    elif not raw_skus and os.getenv("AGENT_PRICE_USDC"):
+        agent_price_usdc = int(os.environ["AGENT_PRICE_USDC"])
+        skus = tuple(
+            AgentSku(
+                sku_id=s.sku_id, title=s.title, price_ton=s.price_ton,
+                price_usd=s.price_usd, initial_stock=s.initial_stock,
+                kind=s.kind, price_usdc=agent_price_usdc,
+            )
+            for s in skus
+        )
+        rails.append("USDC")
+
+    sol_cluster_raw = (_chain_env("SOL", "CLUSTER") or "").strip().lower()
+    if _chain_env_bool("SOL", "TESTNET", default=False) or sol_cluster_raw in {"devnet", "testnet"}:
+        sol_cluster = "devnet"
+    else:
+        sol_cluster = "mainnet"
+    from chains.solana.constants import DEFAULT_RPC_DEVNET, DEFAULT_RPC_MAINNET, USDC_MINT_DEVNET, USDC_MINT_MAINNET
+    sol_wallet_pk = _chain_env("SOL", "WALLET_PK")
+    sol_wallet: str | None = None
+    if "USDC" in rails and not sol_wallet_pk:
+        raise RuntimeError("USDC rail requires SOL_WALLET_PK")
+    if sol_wallet_pk:
+        from chains.solana.wallet import parse_solana_keypair
+        sol_wallet = str(parse_solana_keypair(sol_wallet_pk).pubkey())
+    sol_rpc_url = _chain_env("SOL", "RPC_URL") or (
+        DEFAULT_RPC_DEVNET if sol_cluster == "devnet" else DEFAULT_RPC_MAINNET
+    )
+    sol_usdc_mint = _chain_env("SOL", "USDC_MINT") or (
+        USDC_MINT_DEVNET if sol_cluster == "devnet" else USDC_MINT_MAINNET
+    )
 
     agent_name = os.environ["AGENT_NAME"]
     slug = _agent_slug(agent_name)
@@ -463,4 +522,10 @@ def load_settings(env_file: str | None = None) -> Settings:
             (_chain_env("TON", "JETTON_WALLET_CODE", "JETTON_WALLET_CODE") or "").strip()
             or None
         ),
+        sol_wallet_pk=sol_wallet_pk,
+        sol_wallet=sol_wallet,
+        sol_rpc_url=sol_rpc_url,
+        sol_cluster=sol_cluster,
+        sol_usdc_mint=sol_usdc_mint,
+        agent_price_usdc=agent_price_usdc,
     )
