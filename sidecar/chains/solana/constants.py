@@ -44,3 +44,10 @@ SIGNATURE_FEE_LAMPORTS = 5_000
 # buyer's USDC ATA, paid by the seller).
 TOKEN_ACCOUNT_RENT_LAMPORTS = 2_039_280  # fallback; live value via RPC
 TOKEN_ACCOUNT_SIZE = 165
+
+# Discovery registry: heartbeat = transfer to the registry wallet + Memo
+# ``CTLX:REG:<thin json>`` (same descriptor as the TON heartbeat). The registry
+# account must already exist rent-exempt, or the small transfer fails on-chain.
+REG_MEMO_PREFIX = "CTLX:REG:"
+REG_HEARTBEAT_LAMPORTS = 140_000  # 0.00014 SOL ≈ 1.5¢ at ~$109/SOL, on par with 0.01 TON
+REGISTRY_ADDRESS_DEVNET = "8mJ49cRNj2zM1rvLXSBYAy65aSfJeS4KzeXo2jEuWYtR"

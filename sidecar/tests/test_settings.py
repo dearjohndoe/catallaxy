@@ -48,7 +48,9 @@ REQUIRED_KEYS = {
 }
 
 # Keys that are truly required (always checked)
-_ALWAYS_REQUIRED = {k for k in REQUIRED_KEYS if k != "AGENT_PRICE"}
+# The TON key is required only for TON rails or without a SOL key; it's checked
+# after the agent's rails are known (test_missing_both_wallet_pk_names_*).
+_ALWAYS_REQUIRED = {k for k in REQUIRED_KEYS if k not in ("AGENT_PRICE", "AGENT_WALLET_PK")}
 
 
 def _apply_required(monkeypatch, overrides: dict[str, str] | None = None):

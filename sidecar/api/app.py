@@ -60,19 +60,24 @@ class SidecarApp:
         self.tonapi_client: TonAPIClient | None = (
             None if os.environ.get("TONAPI_FALLBACK_DISABLED") == "1" else TonAPIClient()
         )
-        self.verifier = PaymentVerifier(
-            agent_wallet=settings.agent_wallet,
-            min_amount=0,  # per-call min comes from SKU; constructor default unused
-            payment_timeout_seconds=settings.payment_timeout,
-            enforce_comment_nonce=settings.enforce_comment_nonce,
-            testnet=settings.testnet,
-            tonapi_client=self.tonapi_client,
-        )
+        # TON verifier/sender exist only with a TON key; a Solana-only agent
+        # runs without them (no TON rails, no TON heartbeat).
+        self.verifier: PaymentVerifier | None = None
+        self.sender: TransferSender | None = None
+        if settings.agent_wallet_pk:
+            self.verifier = PaymentVerifier(
+                agent_wallet=settings.agent_wallet,
+                min_amount=0,  # per-call min comes from SKU; constructor default unused
+                payment_timeout_seconds=settings.payment_timeout,
+                enforce_comment_nonce=settings.enforce_comment_nonce,
+                testnet=settings.testnet,
+                tonapi_client=self.tonapi_client,
+            )
+            self.sender = TransferSender(
+                private_key_hex=settings.agent_wallet_pk,
+                testnet=settings.testnet,
+            )
         self.state_store = StateStore(settings.state_path)
-        self.sender = TransferSender(
-            private_key_hex=settings.agent_wallet_pk,
-            testnet=settings.testnet,
-        )
         self.jetton_verifier: JettonPaymentVerifier | None = None
         self._agent_jetton_wallet: str | None = None
         self._jetton_init_lock = asyncio.Lock()
@@ -102,7 +107,8 @@ class SidecarApp:
         self._dynamic_prices_cache = DynamicPriceCache()
         # Heartbeat is created in lifecycle.startup once args_schema and sidecar_id
         # are loaded — there's no useful skeleton we could put here.
-        self.heartbeat: HeartbeatManager | None = None
+        # One manager per registry (TON and/or Solana).
+        self.heartbeats: list[HeartbeatManager] = []
         self.background_tasks: list[asyncio.Task[Any]] = []
         self.quotes: dict[str, QuoteEntry] = {}
         # Rate Limiting state: ip -> list of timestamps
@@ -115,23 +121,23 @@ class SidecarApp:
         # Payment rails, keyed by rail id. Late-bound state (verifier instance,
         # agent jetton wallet, sidecar_id) is read through callables since it's
         # created/loaded after __init__.
-        self.rails: dict[str, ChainRail] = {
-            "TON": TonRail(
+        self.rails: dict[str, ChainRail] = {}
+        if self.sender is not None:
+            self.rails["TON"] = TonRail(
                 get_verifier=lambda: self.verifier,
                 sender=self.sender,
                 agent_wallet=settings.agent_wallet,
                 get_sidecar_id=lambda: self.sidecar_id,
                 refund_fee_nanoton=settings.refund_fee_nanoton,
-            ),
-            "USDT": UsdtRail(
+            )
+            self.rails["USDT"] = UsdtRail(
                 get_verifier=lambda: self.jetton_verifier,
                 get_agent_jetton_wallet=lambda: self._agent_jetton_wallet,
                 sender=self.sender,
                 agent_wallet=settings.agent_wallet,
                 usdt_master=settings.usdt_master,
                 get_sidecar_id=lambda: self.sidecar_id,
-            ),
-        }
+            )
         sol_rails = {"USDC", "SOL"} & set(settings.payment_rails)
         if settings.sol_wallet_pk and sol_rails:
             from chains.solana.rpc import SolanaRpc

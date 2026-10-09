@@ -17,7 +17,7 @@ from payments import (
     PaymentVerificationError,
 )
 from settings import AgentSku, SkuKind
-from chains.base import chain_for_rail, namespaced_pub_key, namespaced_tx_key
+from chains.base import RAIL_IDS, chain_for_rail, namespaced_pub_key, namespaced_tx_key
 
 from api.domain.invocation import create_runner
 from api.domain.pricing import resolve_sku
@@ -315,15 +315,15 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
                 return job_id
             return await wait_and_render(job_id, sidecar)
 
-        # Rail-agnostic guard: reject a configured rail this SKU doesn't price.
-        # (Scoped to known rails to preserve the prior behaviour for unknown
-        # rail strings; the literal "TON"/"USDT" pair is gone.)
-        if parsed.rail in sidecar.rails and sku.price_for(parsed.rail) is None:
+        # Rail-agnostic guard: reject a known rail this SKU doesn't price —
+        # including one this agent has no rail object for (TON on a
+        # Solana-only agent). Unknown rail strings keep the prior behaviour.
+        if parsed.rail in RAIL_IDS and sku.price_for(parsed.rail) is None:
             if not parsed.rail_explicit:
                 priced = list(sku.prices)
                 if priced:
                     parsed = dataclasses.replace(parsed, rail=priced[0])
-            if parsed.rail in sidecar.rails and sku.price_for(parsed.rail) is None:
+            if sku.price_for(parsed.rail) is None:
                 return web.json_response(
                     {"error": "unsupported_rail_for_sku", "sku": sku.sku_id, "rail": parsed.rail}, status=400,
                 )

@@ -13,8 +13,9 @@ Buyer/member keys are generated fresh, saved next to the scripts
    - `run/devnet.env`: `AGENT_COMMAND=<python> <abs path>/agent.py`,
      `AGENT_SKUS=basic:inf:sol=1000000:usdc=10000`, `SOL_WALLET_PK=<seller json>`,
      `SOL_CLUSTER=devnet`, `PORT=18731`, `AGENT_ENDPOINT=http://127.0.0.1:18731`,
-     `REFUND_WORKER_INTERVAL_SECONDS=5`, `RATE_LIMIT_REQUESTS=100`, plus any
-     testnet `TON_WALLET_PK` (startup waits ~100 s on the failing TON heartbeat).
+     `REFUND_WORKER_INTERVAL_SECONDS=5`, `RATE_LIMIT_REQUESTS=100`. No TON key
+     needed: the agent heartbeats into the devnet Solana registry
+     (`8mJ49cRNj2zM1rvLXSBYAy65aSfJeS4KzeXo2jEuWYtR`) and starts in seconds.
    - `cd run && python ../../../sidecar.py run --env-file devnet.env`
    - `python e2e_invoke.py <seller.json> buyer.devnet.json http://127.0.0.1:18731`
    - `npm install && python e2e_squads.py <seller.json> member.devnet.json http://127.0.0.1:18731`

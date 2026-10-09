@@ -62,7 +62,8 @@ async def balancer_rebuild_loop(app: "SidecarApp") -> None:
             logger.exception("balancer_rebuild: JettonPaymentVerifier rebuild failed")
 
         try:
-            await app.sender.rebuild_client()
-            logger.info("balancer_rebuild: TransferSender client rebuilt")
+            if app.sender is not None:
+                await app.sender.rebuild_client()
+                logger.info("balancer_rebuild: TransferSender client rebuilt")
         except Exception:
             logger.exception("balancer_rebuild: TransferSender rebuild failed")

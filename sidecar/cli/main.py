@@ -31,6 +31,7 @@ async def async_main() -> int:
             store = StateStore(settings.state_path)
             state = store.load()
             state.last_heartbeat = None
+            state.last_sol_heartbeat = None
             store.save(state)
             logger.info("Cleared last_heartbeat — fresh heartbeat will be sent on startup")
         return await run_server(settings)

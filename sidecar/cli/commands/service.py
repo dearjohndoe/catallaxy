@@ -112,6 +112,7 @@ def handle_service_command(args: argparse.Namespace) -> int:
             store = StateStore(settings.state_path)
             state = store.load()
             state.last_heartbeat = None
+            state.last_sol_heartbeat = None
             store.save(state)
             logger.info("Cleared last_heartbeat — fresh heartbeat will be sent after restart")
         except Exception as exc:

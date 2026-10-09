@@ -80,6 +80,11 @@ async def handle_info(_: web.Request, sidecar: "SidecarApp") -> web.Response:
                 entry["price_ton"] = price_ton
             if price_usd is not None:
                 entry["price_usd"] = price_usd
+            # Solana rails are always static (settings rejects sol/usdc=dynamic).
+            if sku_obj is not None and sku_obj.price_usdc is not None:
+                entry["price_usdc"] = sku_obj.price_usdc
+            if sku_obj is not None and sku_obj.price_sol is not None:
+                entry["price_sol"] = sku_obj.price_sol
         if v.stock_left is not None:
             entry["stock_left"] = v.stock_left
         if v.total is not None:

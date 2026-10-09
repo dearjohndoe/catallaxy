@@ -86,9 +86,10 @@ class Settings:
     agent_description: str
     agent_price: int
     agent_endpoint: str
-    agent_wallet_pk: str
+    # TON key/wallet: None on a Solana-only agent (no TON/USDT rails).
+    agent_wallet_pk: str | None
     agent_wallet_seed: str | None
-    agent_wallet: str
+    agent_wallet: str | None
     registry_address: str
     port: int
     payment_timeout: int
@@ -138,6 +139,9 @@ class Settings:
     # like refund_fee_nanoton on TON) and the commitment we deliver on.
     sol_refund_fee_lamports: int = 5_000
     sol_commitment: str = "confirmed"
+    # Solana discovery registry wallet. None → no Solana heartbeat (mainnet has
+    # no default yet).
+    sol_registry_address: str | None = None
 
     @property
     def capability(self) -> str:
@@ -391,10 +395,6 @@ def load_settings(env_file: str | None = None) -> Settings:
         "AGENT_ENDPOINT",
     ]
     missing = [key for key in required_keys if not os.getenv(key)]
-    # TON chain key: per-chain TON_WALLET_PK, legacy AGENT_WALLET_PK.
-    agent_wallet_pk = _chain_env("TON", "WALLET_PK", "AGENT_WALLET_PK")
-    if not agent_wallet_pk:
-        missing.append("TON_WALLET_PK (or AGENT_WALLET_PK)")
     if missing:
         raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
 
@@ -455,12 +455,23 @@ def load_settings(env_file: str | None = None) -> Settings:
         rails.append("SOL")
         agent_price_sol = min(s.price_sol for s in skus if s.kind is not SkuKind.FREE and s.price_sol)
 
+    # TON chain key: per-chain TON_WALLET_PK, legacy AGENT_WALLET_PK. Needed for
+    # the TON rails; otherwise optional (then no TON heartbeat either) as long
+    # as there is a Solana key to heartbeat and refund with.
+    agent_wallet_pk = _chain_env("TON", "WALLET_PK", "AGENT_WALLET_PK") or None
+    ton_rails = [r for r in rails if r in ("TON", "USDT")]
+    if not agent_wallet_pk and (ton_rails or not _chain_env("SOL", "WALLET_PK")):
+        why = f"{'/'.join(ton_rails)} rail" if ton_rails else "an agent without SOL_WALLET_PK"
+        raise RuntimeError(f"Missing required env vars: TON_WALLET_PK (or AGENT_WALLET_PK) — needed for {why}")
+
     sol_cluster_raw = (_chain_env("SOL", "CLUSTER") or "").strip().lower()
     if _chain_env_bool("SOL", "TESTNET", default=False) or sol_cluster_raw in {"devnet", "testnet"}:
         sol_cluster = "devnet"
     else:
         sol_cluster = "mainnet"
-    from chains.solana.constants import DEFAULT_RPC_DEVNET, DEFAULT_RPC_MAINNET, USDC_MINT_DEVNET, USDC_MINT_MAINNET
+    from chains.solana.constants import (
+        DEFAULT_RPC_DEVNET, DEFAULT_RPC_MAINNET, REGISTRY_ADDRESS_DEVNET, USDC_MINT_DEVNET, USDC_MINT_MAINNET,
+    )
     sol_wallet_pk = _chain_env("SOL", "WALLET_PK")
     sol_wallet: str | None = None
     for sol_rail in ("USDC", "SOL"):
@@ -481,6 +492,15 @@ def load_settings(env_file: str | None = None) -> Settings:
     sol_usdc_mint = _chain_env("SOL", "USDC_MINT") or (
         USDC_MINT_DEVNET if sol_cluster == "devnet" else USDC_MINT_MAINNET
     )
+    sol_registry_address = (_chain_env("SOL", "REGISTRY_ADDRESS") or "").strip() or (
+        REGISTRY_ADDRESS_DEVNET if sol_cluster == "devnet" else None
+    )
+    if sol_registry_address:
+        from solders.pubkey import Pubkey
+        try:
+            Pubkey.from_string(sol_registry_address)
+        except ValueError:
+            raise RuntimeError(f"SOL_REGISTRY_ADDRESS is not a valid Solana address: {sol_registry_address!r}")
 
     agent_name = os.environ["AGENT_NAME"]
     slug = _agent_slug(agent_name)
@@ -500,7 +520,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         agent_description=os.environ["AGENT_DESCRIPTION"],
         agent_price=agent_price,
         agent_endpoint=os.environ["AGENT_ENDPOINT"],
-        agent_wallet=_derive_wallet_address(agent_wallet_pk, testnet),
+        agent_wallet=_derive_wallet_address(agent_wallet_pk, testnet) if agent_wallet_pk else None,
         agent_wallet_pk=agent_wallet_pk,
         agent_wallet_seed=_chain_env("TON", "WALLET_SEED", "AGENT_WALLET_SEED"),
         registry_address=_chain_env("TON", "REGISTRY_ADDRESS", default=REGISTRY_ADDRESS),
@@ -556,4 +576,5 @@ def load_settings(env_file: str | None = None) -> Settings:
         agent_price_sol=agent_price_sol,
         sol_refund_fee_lamports=sol_refund_fee_lamports,
         sol_commitment=sol_commitment,
+        sol_registry_address=sol_registry_address,
     )

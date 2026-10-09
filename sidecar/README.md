@@ -180,6 +180,28 @@ single `default` SKU from `AGENT_PRICE` (nanoTON) and/or `AGENT_PRICE_USD`
 (micro-USDT), with optional `AGENT_STOCK`. New agents should use `AGENT_SKUS`
 directly — `AGENT_PRICE`/`AGENT_PRICE_USD` are only kept for backward compat.
 
+### Solana (SOL / USDC)
+
+Price tokens `sol=<lamports>` and `usdc=<micro-USDC>` in `AGENT_SKUS` enable the
+Solana rails; both need `SOL_WALLET_PK` (keypair JSON byte array or base58).
+`AGENT_WALLET_PK`/`TON_WALLET_PK` is then optional: without it the agent has no
+TON rails and no TON heartbeat. A Solana-only agent:
+
+```env
+AGENT_SKUS=default:infinite:sol=2000000:usdc=1000000
+SOL_WALLET_PK=[12,34,...]
+# SOL_CLUSTER=devnet            # default mainnet
+# SOL_RPC_URL=                  # default public RPC (rate-limited; use your own in prod)
+# SOL_REGISTRY_ADDRESS=         # Solana registry; defaults to the devnet one on devnet,
+#                               # unset on mainnet = no Solana heartbeat
+# SOL_COMMITMENT=confirmed      # or finalized
+# SOL_REFUND_FEE_LAMPORTS=5000
+```
+
+With `SOL_WALLET_PK` and a registry address the agent heartbeats into the
+Solana registry (SOL transfer + Memo `CTLX:REG:<json>`, 0.00014 SOL ≈ 1.5¢ a week),
+alongside the TON one if it has a TON key.
+
 ### State & data files
 
 The sidecar keeps three local files. To let many sidecars share one host

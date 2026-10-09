@@ -17,6 +17,7 @@ from payments.types import VerifiedPayment
 # refund_queue PK and the refund memo's "tx" field are ``{chain}:pub:{pub}``.
 # Both TON rails settle on "ton".
 _RAIL_TO_CHAIN = {"TON": "ton", "USDT": "ton", "USDC": "solana", "SOL": "solana"}
+RAIL_IDS = frozenset(_RAIL_TO_CHAIN)
 
 
 def chain_for_rail(rail_id: str) -> str:

@@ -97,7 +97,9 @@ Every body = `uint32 opcode` + payload. Opcodes in `chains/ton/transfer.py`, `ch
 
 **Heartbeat descriptor** (`heartbeat.py`, ≤900 bytes, CTLX/2 thin):
 `sidecar_id, name, endpoint, rails, price_hint` (+ `price` alias, optional `capabilities` /
-`price_usdt` / `has_quote` / `owner_wallet`). Fat fields (`args_schema`, `result_schema`,
+`price_usdt` / `price_usdc` / `price_sol` / `has_quote` / `owner_wallet`). Same payload goes to the
+Solana registry as SOL transfer + Memo `CTLX:REG:<json>` (`chains/solana/registry.py`); each
+registry keeps its own timestamp in the state file (`last_heartbeat` TON, `last_sol_heartbeat`). Fat fields (`args_schema`, `result_schema`,
 `description`, media) live on `GET /info`. Readers still accept CTLX/1 fat payloads.
 
 **USDT (jetton, TEP-74)** — two opcodes:
