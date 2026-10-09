@@ -60,6 +60,11 @@ price, `/invoke` answers `402 {"error":"Transaction amount is lower than require
 queues a refund under `{chain}:{tx_hash}` (not `{chain}:pub:{pub}`), so the same
 claim nonce stays usable for a full top-up under the same memo. Memo with no
 money to us → plain 402, nothing queued.
+
+**Quotes are TON/USDT-only.** A quote prices only `price`/`price_usdt`, so a
+quoted 402 lists only TON/USDT options, and `/invoke` with `quote_id` on SOL or
+USDC returns `400 {"error":"quote_not_supported_for_rail","supported_rails":["TON","USDT"]}`
+before the quote is locked.
 `memo` = nonce = `{uuid16}:{sidecar_id}` — binds the payment to one order + one agent.
 
 ### `POST /invoke` — claim mode (`{tx, nonce, sku, body}`)

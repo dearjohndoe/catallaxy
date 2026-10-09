@@ -28,6 +28,9 @@ logger = logging.getLogger("sidecar")
 # what actually bounds how long a payment session can be.
 CLAIM_SECRET_TTL_SECONDS = 3600
 
+# Rails a quote can price (QuoteEntry has only ``price``/``price_usdt``).
+QUOTE_RAILS = frozenset({"TON", "USDT"})
+
 
 def unlock_quote(quote_id: str | None, sidecar: "SidecarApp") -> None:
     if quote_id and quote_id in sidecar.quotes:
@@ -152,10 +155,13 @@ async def build_402_response(
         priced.append((sidecar.rails["TON"], min_ton))
     if eff_usd and min_usdt:
         priced.append((sidecar.rails["USDT"], min_usdt))
-    if sku.price_usdc and "USDC" in sidecar.rails:
-        priced.append((sidecar.rails["USDC"], sku.price_usdc))
-    if sku.price_sol and "SOL" in sidecar.rails:
-        priced.append((sidecar.rails["SOL"], sku.price_sol))
+    # A quoted request is only offered on rails the quote prices — otherwise
+    # the buyer would pay the static price and then be refused at claim.
+    if not parsed.quote_id:
+        if sku.price_usdc and "USDC" in sidecar.rails:
+            priced.append((sidecar.rails["USDC"], sku.price_usdc))
+        if sku.price_sol and "SOL" in sidecar.rails:
+            priced.append((sidecar.rails["SOL"], sku.price_sol))
 
     unhealthy_rails = [r.rail_id for r, _ in priced if not r.monitor_healthy(max_age)]
     if unhealthy_rails:

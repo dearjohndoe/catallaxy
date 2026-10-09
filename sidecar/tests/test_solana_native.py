@@ -891,3 +891,50 @@ async def test_refund_worker_usdc_never_touches_ton(app_factory, monkeypatch):
         await app.refund_queue.close()
         await app.tx_store.close()
 
+
+# ── quotes are TON/USDT-only ────────────────────────────────────────────
+
+def _quoted_sol_app(app_factory, rpc: FakeRpc):
+    from api import QuoteEntry
+    app = _sol_app(app_factory, rpc, has_quote=True, rate_limit_requests=100)
+    app.quotes["q1"] = QuoteEntry(price=5_000_000, expires_at=time.time() + 300, sku_id=DEFAULT_SKU_ID)
+    return app
+
+
+async def test_quote_claim_on_sol_rejected_without_locking_quote(app_factory):
+    rpc = FakeRpc()
+    app = _quoted_sol_app(app_factory, rpc)
+    await app.rails["SOL"].monitor.poll()
+    async with _serve_app(app) as c:
+        resp = await c.post("/invoke", json={
+            "capability": "translate", "rail": "SOL", "quote_id": "q1",
+            "proof": _sig(), "nonce": f"abcd1234deadbeef:{SID}", "body": {"text": "hi"},
+        })
+        assert resp.status == 400
+        body = await resp.json()
+        assert body["error"] == "quote_not_supported_for_rail"
+        assert body["supported_rails"] == ["TON", "USDT"]
+        assert app.quotes["q1"].locked is False
+        assert rpc.tx_calls == []
+
+        # USDC (x402) is refused the same way.
+        resp = await c.post("/invoke", json={
+            "capability": "translate", "rail": "USDC", "quote_id": "q1", "body": {"text": "hi"},
+        })
+        assert resp.status == 400
+
+
+async def test_quoted_preflight_offers_only_quote_rails(app_factory):
+    rpc = FakeRpc()
+    app = _quoted_sol_app(app_factory, rpc)
+    await app.rails["SOL"].monitor.poll()
+    async with _serve_app(app) as c:
+        resp = await c.post("/invoke", json={
+            "capability": "translate", "quote_id": "q1", "body": {"text": "hi"},
+        })
+        assert resp.status == 402
+        rails = [o["rail"] for o in (await resp.json())["payment_options"]]
+        assert rails == ["TON"]
+        # Without a quote the SOL option is still there.
+        resp = await c.post("/invoke", json={"capability": "translate", "body": {"text": "hi"}})
+        assert [o["rail"] for o in (await resp.json())["payment_options"]] == ["TON", "SOL"]

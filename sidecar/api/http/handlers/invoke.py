@@ -27,6 +27,7 @@ from api.infra.files import cleanup_uploaded_files
 from api.infra.rate_limit import client_ip
 from api.validation import validate_body
 from api.http.handlers._invoke_helpers import (
+    QUOTE_RAILS,
     build_402_response,
     build_agent_payload,
     claim_stock,
@@ -326,6 +327,16 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
                 return web.json_response(
                     {"error": "unsupported_rail_for_sku", "sku": sku.sku_id, "rail": parsed.rail}, status=400,
                 )
+
+        # Quotes carry only TON/USDT prices; on SOL/USDC the static SKU price
+        # would be charged instead of the quoted one (seller underpaid).
+        # Rejected before the quote is looked up or locked.
+        if parsed.quote_id and parsed.rail not in QUOTE_RAILS:
+            return web.json_response(
+                {"error": "quote_not_supported_for_rail", "rail": parsed.rail,
+                 "supported_rails": sorted(QUOTE_RAILS)},
+                status=400,
+            )
 
         eff_ton, eff_usd, min_ton, min_usdt = await _resolve_amounts(sku, sidecar)
         quote_entry, min_ton, min_usdt, quote_err = _apply_quote_amounts(parsed, sidecar, sku, min_ton, min_usdt)
