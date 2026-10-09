@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from payments import PendingRefund
 
@@ -215,14 +215,18 @@ async def _process_entry(app: "SidecarApp", entry: PendingRefund) -> None:
     # against, and probing wastes one RPC per refund.
     if entry.attempts >= 1 and entry.sender and entry.amount is not None:
         try:
-            async with _acquire_lite_client(app) as client:
-                existing = await find_existing_refund_tx(
-                    client=client,
-                    agent_wallet=app.settings.agent_wallet,
-                    rail=entry.rail,
-                    original_tx_hash=entry.tx_hash,
-                    sidecar_id=app.sidecar_id,
-                )
+            find_existing = _rail_hook(app, entry.rail, "find_existing_refund")
+            if find_existing is not None:
+                existing = await find_existing(entry.tx_hash)
+            else:
+                async with _acquire_lite_client(app) as client:
+                    existing = await find_existing_refund_tx(
+                        client=client,
+                        agent_wallet=app.settings.agent_wallet,
+                        rail=entry.rail,
+                        original_tx_hash=entry.tx_hash,
+                        sidecar_id=app.sidecar_id,
+                    )
         except Exception:
             logger.exception("refund_worker: pre-send dedup probe failed tx=%s", entry.tx_hash)
             existing = None
@@ -328,8 +332,27 @@ async def _process_entry(app: "SidecarApp", entry: PendingRefund) -> None:
         )
 
 
+def _rail_hook(app: "SidecarApp", rail: str, name: str) -> Any | None:
+    """Optional per-rail refund hook (Solana rails own their RPC); TON rails
+    don't define them and keep the liteserver paths below."""
+    rail_obj = (getattr(app, "rails", None) or {}).get(rail)
+    return getattr(rail_obj, name, None)
+
+
 async def _recover_payment_info(app: "SidecarApp", entry: PendingRefund) -> bool:
     """Use the appropriate monitor to find sender + amount for a known nonce."""
+    recover = _rail_hook(app, entry.rail, "recover_payment")
+    if recover is not None:
+        try:
+            found = await recover(entry.nonce)
+        except Exception:
+            logger.exception("refund_worker: %s recover_payment failed tx=%s", entry.rail, entry.tx_hash)
+            return False
+        if found is None:
+            return False
+        await app.refund_queue.update_payment_info(entry.tx_hash, found[0], found[1])
+        return True
+
     if entry.rail == "USDT":
         ok = await app.ensure_jetton_verifier()
         if not ok or app.jetton_verifier is None or app.jetton_verifier._monitor is None:
@@ -381,6 +404,12 @@ async def _check_balance_for_refund(
     """
     if entry.amount is None:
         return False, "amount unknown"
+    check_balance = _rail_hook(app, entry.rail, "check_refund_balance")
+    if check_balance is not None:
+        try:
+            return await check_balance(entry.amount)
+        except Exception as exc:
+            return False, f"balance probe error: {exc!r}"
     try:
         from tonutils.clients import LiteBalancer
         from tonutils.types import NetworkGlobalID

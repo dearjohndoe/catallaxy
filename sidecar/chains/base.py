@@ -1,7 +1,7 @@
 """Chain-agnostic payment + discovery interfaces.
 
 A *rail* is a ``(chain, asset)`` pair identified by ``rail_id`` — e.g. "TON",
-"USDT" (both on the TON chain), later "sol"/"sol:usdc". An agent advertises any
+"USDT" (both on the TON chain), "SOL"/"USDC" (Solana). An agent advertises any
 set of rails independently of which registries it heartbeats into.
 """
 
@@ -16,7 +16,7 @@ from payments.types import VerifiedPayment
 # (canonical after verify) and ``{chain}:pub:{pub}`` (claim-block identity).
 # refund_queue PK and the refund memo's "tx" field are ``{chain}:pub:{pub}``.
 # Both TON rails settle on "ton".
-_RAIL_TO_CHAIN = {"TON": "ton", "USDT": "ton", "USDC": "solana"}
+_RAIL_TO_CHAIN = {"TON": "ton", "USDT": "ton", "USDC": "solana", "SOL": "solana"}
 
 
 def chain_for_rail(rail_id: str) -> str:

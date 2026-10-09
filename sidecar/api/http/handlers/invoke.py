@@ -170,11 +170,11 @@ def _monitor_healthy_for_rail(sidecar: "SidecarApp", rail: str) -> bool:
     verifier level.
     """
     rail_obj = sidecar.rails.get(rail)
-    if rail_obj is not None and rail in {"USDC"}:
+    if rail_obj is not None and rail in {"USDC", "SOL"}:
         try:
             return bool(rail_obj.monitor_healthy(120.0))
         except Exception:
-            logger.exception("_monitor_healthy_for_rail: USDC is_healthy raised")
+            logger.exception("_monitor_healthy_for_rail: %s is_healthy raised", rail)
             return True
     if rail == "USDT":
         verifier = getattr(sidecar, "jetton_verifier", None)

@@ -77,6 +77,13 @@ async def startup(app: "SidecarApp") -> None:
     except Exception:
         logger.exception("PaymentVerifier failed to start")
 
+    sol_rail = app.rails.get("SOL")
+    if sol_rail is not None:
+        try:
+            await sol_rail.start()
+        except Exception:
+            logger.exception("SOL rail monitor failed to start")
+
     if app.jetton_verifier:
         try:
             await app.jetton_verifier.start()
@@ -150,12 +157,13 @@ async def shutdown(app: "SidecarApp") -> None:
         task.cancel()
     await asyncio.gather(*app.background_tasks, return_exceptions=True)
     await app.sender.close()
-    usdc = app.rails.get("USDC")
-    if usdc is not None and hasattr(usdc, "close"):
-        try:
-            await usdc.close()
-        except Exception:
-            logger.exception("USDC rail close failed")
+    for rail_id in ("USDC", "SOL"):
+        rail = app.rails.get(rail_id)
+        if rail is not None and hasattr(rail, "close"):
+            try:
+                await rail.close()
+            except Exception:
+                logger.exception("%s rail close failed", rail_id)
     await app.verifier.close()
     if app.jetton_verifier:
         await app.jetton_verifier.close()

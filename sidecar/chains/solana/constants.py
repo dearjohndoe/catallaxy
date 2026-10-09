@@ -28,3 +28,13 @@ MAX_CU_PRICE_MICROLAMPORTS = 5
 SETTLE_CACHE_TTL_SECONDS = 120
 DEFAULT_RPC_MAINNET = "https://api.mainnet-beta.solana.com"
 DEFAULT_RPC_DEVNET = "https://api.devnet.solana.com"
+
+MEMO_PROGRAM_V1 = Pubkey.from_string("Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo")
+# Native SOL rail: buyer's memo is ``CTLX:PAY:<pub_nonce>``; our refund memo is
+# ``CTLX:REFUND:<json>``. ``sec`` never goes on-chain (split-nonce).
+PAY_MEMO_PREFIX = "CTLX:PAY:"
+REFUND_MEMO_PREFIX = "CTLX:REFUND:"
+# Rent-exempt minimum for a 0-data system account (lamports). A transfer that
+# leaves a new/drained account below this fails on-chain.
+RENT_EXEMPT_MIN_LAMPORTS = 890_880
+SIGNATURE_FEE_LAMPORTS = 5_000

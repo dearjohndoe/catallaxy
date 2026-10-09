@@ -154,6 +154,8 @@ async def build_402_response(
         priced.append((sidecar.rails["USDT"], min_usdt))
     if sku.price_usdc and "USDC" in sidecar.rails:
         priced.append((sidecar.rails["USDC"], sku.price_usdc))
+    if sku.price_sol and "SOL" in sidecar.rails:
+        priced.append((sidecar.rails["SOL"], sku.price_sol))
 
     unhealthy_rails = [r.rail_id for r, _ in priced if not r.monitor_healthy(max_age)]
     if unhealthy_rails:
@@ -265,8 +267,22 @@ async def verify_payment(
     min_ton: int,
     min_usdt: int,
 ) -> Any | web.Response:
-    """Run the right verifier (TON or USDT). Unlocks the quote on every error path."""
+    """Run the right verifier (TON, USDT, SOL). Unlocks the quote on every error path."""
     try:
+        if parsed.rail == "SOL":
+            sol_rail = sidecar.rails.get("SOL")
+            min_sol = sku.price_sol or 0
+            if sol_rail is None or min_sol <= 0:
+                # Unreachable via the SKU gate in handle_invoke; refuse before
+                # touching the chain rather than accept with a zero floor.
+                unlock_quote(parsed.quote_id, sidecar)
+                return web.json_response(
+                    {"error": "unsupported_rail_for_sku", "sku": sku.sku_id, "rail": "SOL"},
+                    status=400,
+                )
+            return await sol_rail.verify(
+                proof=parsed.tx_hash, nonce=parsed.nonce, min_amount=min_sol,
+            )
         if parsed.rail == "USDT":
             if not sidecar.jetton_verifier or not sidecar._agent_jetton_wallet:
                 # Try to bootstrap on the fly — covers both startup misconfig

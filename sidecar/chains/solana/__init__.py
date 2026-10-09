@@ -1,5 +1,6 @@
-"""Solana rails. USDC/x402 exact first; native SOL is a later TON-mirror."""
+"""Solana rails: USDC over x402 exact, native SOL as a TON-mirror (memo + split-nonce)."""
 
+from chains.solana.rail_sol import SolRail
 from chains.solana.rail_usdc import UsdcRail
 
-__all__ = ["UsdcRail"]
+__all__ = ["SolRail", "UsdcRail"]

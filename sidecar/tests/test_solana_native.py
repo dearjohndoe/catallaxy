@@ -1,0 +1,653 @@
+"""Native SOL rail: memo index, verify-by-pub, refunds, settings, /invoke flow.
+
+RPC is an in-memory fake that speaks the jsonParsed shapes of
+``getSignaturesForAddress`` / ``getTransaction`` — no network.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import time
+from typing import Any
+
+import pytest
+from solders.keypair import Keypair
+from solders.signature import Signature
+from solders.transaction import VersionedTransaction
+
+from chains.base import ChainRail
+from chains.solana.constants import (
+    MEMO_PROGRAM,
+    RENT_EXEMPT_MIN_LAMPORTS,
+)
+from chains.solana.rail_sol import SolRail, refund_memo
+from chains.solana.rpc import SolanaRpcError
+from chains.solana.sol_monitor import (
+    SolanaPaymentMonitor,
+    extract_pay_nonce,
+    parse_sol_payment,
+    pay_memo,
+)
+from payments.types import PaymentVerificationError
+from settings import AgentSku, DEFAULT_SKU_ID
+
+from tests.test_api import app_factory, _serve_app  # noqa: F401 (app_factory is a fixture)
+
+
+SID = "sid-test"
+PUB_NONCE = f"abcd1234:{SID}"
+
+
+def _sig() -> str:
+    """A fresh, well-formed base58 signature string."""
+    return str(Keypair().sign_message(str(time.time_ns()).encode()))
+
+
+def _parsed_tx(
+    *,
+    source: str,
+    dest: str,
+    lamports: int,
+    memo: str | None,
+    block_time: int | None = None,
+    err: Any = None,
+    extra: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    ixs: list[dict[str, Any]] = [{
+        "program": "system",
+        "programId": "11111111111111111111111111111111",
+        "parsed": {"type": "transfer", "info": {
+            "source": source, "destination": dest, "lamports": lamports,
+        }},
+    }]
+    if memo is not None:
+        ixs.append({"program": "spl-memo", "programId": str(MEMO_PROGRAM), "parsed": memo})
+    ixs.extend(extra or [])
+    return {
+        "blockTime": int(time.time()) if block_time is None else block_time,
+        "meta": {"err": err},
+        "transaction": {"message": {"instructions": ixs}},
+    }
+
+
+class FakeRpc:
+    """Seller-address history (newest first) + transactions by signature."""
+
+    def __init__(self) -> None:
+        self.rows: list[dict[str, Any]] = []
+        self.txs: dict[str, dict[str, Any]] = {}
+        self.accounts: dict[str, dict[str, Any]] = {}
+        self.balance = 10 * 10**9
+        self.sent: list[str] = []
+        self.fail_signatures = False
+        self.fail_send = False
+        self.signature_calls: list[dict[str, Any]] = []
+        self.tx_calls: list[str] = []
+        self.closed = False
+
+    def pay(
+        self, *, source: str, dest: str, lamports: int, memo: str | None,
+        err: Any = None, block_time: int | None = None, indexed: bool = True,
+    ) -> str:
+        sig = _sig()
+        tx = _parsed_tx(
+            source=source, dest=dest, lamports=lamports, memo=memo,
+            err=err, block_time=block_time,
+        )
+        self.txs[sig] = tx
+        if indexed:
+            rendered = f"[{len(memo)}] {memo}" if memo else None
+            self.rows.insert(0, {
+                "signature": sig, "err": err, "memo": rendered,
+                "blockTime": tx["blockTime"],
+            })
+        return sig
+
+    async def get_signatures_for_address(
+        self, address, *, limit=100, before=None, until=None, commitment="confirmed",
+    ):
+        self.signature_calls.append({"before": before, "until": until, "limit": limit})
+        if self.fail_signatures:
+            raise SolanaRpcError("boom")
+        rows = list(self.rows)
+        if before is not None:
+            idx = next(i for i, r in enumerate(rows) if r["signature"] == before)
+            rows = rows[idx + 1:]
+        if until is not None:
+            cut = next((i for i, r in enumerate(rows) if r["signature"] == until), len(rows))
+            rows = rows[:cut]
+        return rows[:limit]
+
+    async def get_transaction(self, signature, commitment="confirmed"):
+        self.tx_calls.append(signature)
+        return self.txs.get(signature)
+
+    async def get_account_info(self, pubkey):
+        return self.accounts.get(pubkey)
+
+    async def get_balance(self, pubkey, commitment="confirmed"):
+        return self.balance
+
+    async def get_latest_blockhash(self):
+        return "11111111111111111111111111111111", 100
+
+    async def send_transaction(self, tx_b64):
+        if self.fail_send:
+            raise SolanaRpcError("send failed")
+        self.sent.append(tx_b64)
+        return _sig()
+
+    async def close(self):
+        self.closed = True
+
+
+def _rail(rpc: FakeRpc | None = None, *, kp: Keypair | None = None, **kw: Any) -> SolRail:
+    rpc = rpc or FakeRpc()
+    rail = SolRail(
+        keypair=kp or Keypair(),
+        rpc=rpc,  # type: ignore[arg-type]
+        cluster="devnet",
+        get_sidecar_id=lambda: SID,
+        payment_timeout_seconds=kw.pop("payment_timeout_seconds", 300),
+        **kw,
+    )
+    rail.VERIFY_TIMEOUT = 0.05
+    rail.VERIFY_POLL = 0.0
+    return rail
+
+
+def _decode_sent(b64: str) -> VersionedTransaction:
+    return VersionedTransaction.from_bytes(base64.b64decode(b64))
+
+
+# ── memo / tx parsing ───────────────────────────────────────────────────
+
+def test_extract_pay_nonce_from_raw_and_rpc_rendered_memo():
+    assert extract_pay_nonce(pay_memo(PUB_NONCE)) == PUB_NONCE
+    assert extract_pay_nonce(f"[54] {pay_memo(PUB_NONCE)}") == PUB_NONCE
+    assert extract_pay_nonce(f"[3] gm; [54] {pay_memo(PUB_NONCE)}") == PUB_NONCE
+    assert extract_pay_nonce("[5] hello") is None
+    assert extract_pay_nonce("CTLX:PAY:nothex12:sid") is None
+    assert extract_pay_nonce(None) is None
+
+
+def test_pay_memo_carries_only_pub_half():
+    # 16-hex full nonce (pub+sec) must not be a valid pay memo match.
+    assert extract_pay_nonce(pay_memo(f"abcd1234deadbeef:{SID}")) is None
+
+
+def test_parse_sol_payment_sums_transfers_to_us_and_reads_memo():
+    seller, buyer, other = (str(Keypair().pubkey()) for _ in range(3))
+    tx = _parsed_tx(
+        source=buyer, dest=seller, lamports=700, memo=pay_memo(PUB_NONCE),
+        extra=[
+            {"program": "system", "parsed": {"type": "transfer", "info": {
+                "source": buyer, "destination": seller, "lamports": 300}}},
+            {"program": "system", "parsed": {"type": "transfer", "info": {
+                "source": buyer, "destination": other, "lamports": 10**9}}},
+        ],
+    )
+    p = parse_sol_payment(tx, signature="S", pay_to=seller)
+    assert (p.amount, p.sender, p.nonce, p.failed) == (1000, buyer, PUB_NONCE, False)
+
+
+def test_parse_sol_payment_flags_failed_tx():
+    seller, buyer = str(Keypair().pubkey()), str(Keypair().pubkey())
+    tx = _parsed_tx(source=buyer, dest=seller, lamports=5, memo=None,
+                    err={"InstructionError": [0, "Custom"]})
+    p = parse_sol_payment(tx, signature="S", pay_to=seller)
+    assert p.failed and p.nonce is None
+
+
+# ── monitor ─────────────────────────────────────────────────────────────
+
+async def test_monitor_indexes_memo_and_reports_health():
+    rpc = FakeRpc()
+    seller = str(Keypair().pubkey())
+    mon = SolanaPaymentMonitor(rpc, seller)  # type: ignore[arg-type]
+    assert mon.is_healthy() is False
+    sig = rpc.pay(source="B", dest=seller, lamports=1, memo=pay_memo(PUB_NONCE))
+    await mon.poll()
+    assert mon.get(PUB_NONCE) == sig
+    assert mon.is_healthy() is True
+    mon.consume(PUB_NONCE)
+    assert mon.get(PUB_NONCE) is None
+
+
+async def test_monitor_skips_failed_txs():
+    rpc = FakeRpc()
+    mon = SolanaPaymentMonitor(rpc, "S")  # type: ignore[arg-type]
+    rpc.pay(source="B", dest="S", lamports=1, memo=pay_memo(PUB_NONCE), err={"x": 1})
+    await mon.poll()
+    assert mon.get(PUB_NONCE) is None
+
+
+async def test_monitor_first_payment_owns_nonce_even_in_one_batch():
+    """Dust copying a (now public) memo after the real payment must not
+    displace it — rows arrive newest-first, the index must be oldest-wins."""
+    rpc = FakeRpc()
+    mon = SolanaPaymentMonitor(rpc, "S")  # type: ignore[arg-type]
+    real = rpc.pay(source="buyer", dest="S", lamports=10**8, memo=pay_memo(PUB_NONCE))
+    rpc.pay(source="attacker", dest="S", lamports=1, memo=pay_memo(PUB_NONCE))
+    await mon.poll()
+    assert mon.get(PUB_NONCE) == real
+
+
+async def test_monitor_uses_watermark_and_paginates():
+    rpc = FakeRpc()
+    mon = SolanaPaymentMonitor(rpc, "S")  # type: ignore[arg-type]
+    mon.PAGE_LIMIT = 2
+    sigs = [rpc.pay(source="B", dest="S", lamports=1, memo=pay_memo(f"0000000{i}:{SID}"))
+            for i in range(5)]
+    await mon.poll()
+    assert all(mon.get(f"0000000{i}:{SID}") == sigs[i] for i in range(5))
+    assert [c["before"] for c in rpc.signature_calls] == [None, sigs[3], sigs[1]]
+
+    rpc.signature_calls.clear()
+    new = rpc.pay(source="B", dest="S", lamports=1, memo=pay_memo(f"00000009:{SID}"))
+    await mon.poll()
+    assert rpc.signature_calls[0]["until"] == sigs[4]
+    assert mon.get(f"00000009:{SID}") == new
+
+
+async def test_monitor_stays_unhealthy_when_rpc_fails():
+    rpc = FakeRpc()
+    rpc.fail_signatures = True
+    mon = SolanaPaymentMonitor(rpc, "S")  # type: ignore[arg-type]
+    with pytest.raises(SolanaRpcError):
+        await mon.poll()
+    assert mon.is_healthy() is False
+
+
+async def test_monitor_ignores_rows_older_than_cache_ttl():
+    rpc = FakeRpc()
+    mon = SolanaPaymentMonitor(rpc, "S")  # type: ignore[arg-type]
+    rpc.pay(source="B", dest="S", lamports=1, memo=pay_memo(PUB_NONCE),
+            block_time=int(time.time()) - mon.CACHE_TTL - 10)
+    await mon.poll()
+    assert mon.get(PUB_NONCE) is None
+
+
+# ── verify ──────────────────────────────────────────────────────────────
+
+def test_sol_rail_satisfies_chain_rail_protocol():
+    assert isinstance(_rail(), ChainRail)
+
+
+async def test_verify_by_nonce_returns_onchain_signature_not_client_proof():
+    rpc = FakeRpc()
+    rail = _rail(rpc)
+    seller = str(rail.pay_to)
+    real = rpc.pay(source="buyer", dest=seller, lamports=2_000_000, memo=pay_memo(PUB_NONCE))
+    await rail.monitor.poll()
+    v = await rail.verify(proof="client-garbage", nonce=PUB_NONCE, min_amount=2_000_000)
+    assert v.tx_hash == real
+    assert (v.sender, v.amount, v.recipient, v.comment) == ("buyer", 2_000_000, seller, PUB_NONCE)
+
+
+async def test_verify_uses_proof_hint_when_poller_lags():
+    rpc = FakeRpc()
+    rail = _rail(rpc)
+    sig = rpc.pay(source="buyer", dest=str(rail.pay_to), lamports=10,
+                  memo=pay_memo(PUB_NONCE), indexed=False)
+    v = await rail.verify(proof=sig, nonce=PUB_NONCE, min_amount=10)
+    assert v.tx_hash == sig
+    assert rail.monitor.get(PUB_NONCE) == sig  # remembered for refund recovery
+
+
+async def test_verify_rejects_hint_with_foreign_memo():
+    """A real tx to us under another nonce must not satisfy this claim."""
+    rpc = FakeRpc()
+    rail = _rail(rpc)
+    other = rpc.pay(source="buyer", dest=str(rail.pay_to), lamports=10**9,
+                    memo=pay_memo(f"99999999:{SID}"), indexed=False)
+    with pytest.raises(PaymentVerificationError, match="not found"):
+        await rail.verify(proof=other, nonce=PUB_NONCE, min_amount=10)
+    assert rail.monitor.get(PUB_NONCE) is None
+
+
+async def test_verify_ignores_failed_hint_tx():
+    rpc = FakeRpc()
+    rail = _rail(rpc)
+    sig = rpc.pay(source="buyer", dest=str(rail.pay_to), lamports=10,
+                  memo=pay_memo(PUB_NONCE), err={"x": 1}, indexed=False)
+    with pytest.raises(PaymentVerificationError, match="not found"):
+        await rail.verify(proof=sig, nonce=PUB_NONCE, min_amount=10)
+
+
+async def test_verify_underpaid_is_definitive_rejection():
+    rpc = FakeRpc()
+    rail = _rail(rpc)
+    rpc.pay(source="buyer", dest=str(rail.pay_to), lamports=9, memo=pay_memo(PUB_NONCE))
+    await rail.monitor.poll()
+    with pytest.raises(PaymentVerificationError, match="lower than required"):
+        await rail.verify(proof="", nonce=PUB_NONCE, min_amount=10)
+
+
+async def test_verify_expired_payment_rejected():
+    rpc = FakeRpc()
+    rail = _rail(rpc, payment_timeout_seconds=60)
+    sig = rpc.pay(source="buyer", dest=str(rail.pay_to), lamports=10,
+                  memo=pay_memo(PUB_NONCE), block_time=int(time.time()) - 120, indexed=False)
+    with pytest.raises(PaymentVerificationError, match="expired"):
+        await rail.verify(proof=sig, nonce=PUB_NONCE, min_amount=10)
+
+
+async def test_verify_memo_without_transfer_to_us_rejected():
+    rpc = FakeRpc()
+    rail = _rail(rpc)
+    rpc.pay(source="buyer", dest=str(Keypair().pubkey()), lamports=10**9, memo=pay_memo(PUB_NONCE))
+    await rail.monitor.poll()
+    with pytest.raises(PaymentVerificationError, match="lower than required"):
+        await rail.verify(proof="", nonce=PUB_NONCE, min_amount=1)
+
+
+async def test_verify_rpc_error_is_not_a_definitive_rejection():
+    """Transport errors must surface as non-PaymentVerificationError so the
+    handler queues a refund instead of 402-ing a possibly real payment."""
+    rpc = FakeRpc()
+    rail = _rail(rpc)
+    rpc.pay(source="buyer", dest=str(rail.pay_to), lamports=10, memo=pay_memo(PUB_NONCE))
+    await rail.monitor.poll()
+
+    async def boom(*a, **k):
+        raise SolanaRpcError("rpc down")
+
+    rpc.get_transaction = boom  # type: ignore[method-assign]
+    with pytest.raises(SolanaRpcError):
+        await rail.verify(proof="", nonce=PUB_NONCE, min_amount=10)
+
+
+# ── 402 option ──────────────────────────────────────────────────────────
+
+def test_payment_option_shape():
+    rail = _rail()
+    opt = rail.payment_option(1_000_000, PUB_NONCE)
+    assert opt == {
+        "rail": "SOL",
+        "address": str(rail.pay_to),
+        "amount": "1000000",
+        "memo": f"CTLX:PAY:{PUB_NONCE}",
+        "network": "devnet",
+    }
+
+
+# ── refunds ─────────────────────────────────────────────────────────────
+
+async def test_refund_sends_transfer_minus_fee_with_refund_memo():
+    rpc = FakeRpc()
+    kp = Keypair()
+    rail = _rail(rpc, kp=kp, refund_fee_lamports=5_000)
+    buyer = Keypair().pubkey()
+    rpc.accounts[str(buyer)] = {"lamports": 1}
+    sig = await rail.refund(str(buyer), 2_000_000, original_tx_hash="solana:pub:abcd1234",
+                            reason="agent_failed")
+    assert sig is not None
+    tx = _decode_sent(rpc.sent[0])
+    msg = tx.message
+    keys = list(msg.account_keys)
+    assert keys[0] == kp.pubkey()
+    assert tx.verify_with_results() == [True]
+    by_program = {str(keys[ix.program_id_index]): ix for ix in msg.instructions}
+    transfer_ix = by_program["11111111111111111111111111111111"]
+    assert keys[transfer_ix.accounts[1]] == buyer
+    assert int.from_bytes(bytes(transfer_ix.data)[4:12], "little") == 1_995_000
+    memo = bytes(by_program[str(MEMO_PROGRAM)].data).decode()
+    assert memo == refund_memo("solana:pub:abcd1234", "agent_failed", SID)
+    assert json.loads(memo.removeprefix("CTLX:REFUND:"))["tx"] == "solana:pub:abcd1234"
+
+
+async def test_refund_skipped_when_amount_not_above_fee():
+    rpc = FakeRpc()
+    rail = _rail(rpc, refund_fee_lamports=5_000)
+    assert await rail.refund(str(Keypair().pubkey()), 5_000, original_tx_hash="t", reason="r") is None
+    assert rpc.sent == []
+
+
+async def test_refund_skipped_below_rent_for_new_account():
+    rpc = FakeRpc()
+    rail = _rail(rpc, refund_fee_lamports=0)
+    to = str(Keypair().pubkey())
+    assert await rail.refund(to, RENT_EXEMPT_MIN_LAMPORTS - 1, original_tx_hash="t", reason="r") is None
+    assert rpc.sent == []
+    # Existing account can receive any amount.
+    rpc.accounts[to] = {"lamports": 1}
+    assert await rail.refund(to, 1_000, original_tx_hash="t", reason="r") is not None
+
+
+async def test_refund_send_failure_returns_none():
+    rpc = FakeRpc()
+    rpc.fail_send = True
+    rail = _rail(rpc)
+    assert await rail.refund(str(Keypair().pubkey()), 10**9, original_tx_hash="t", reason="r") is None
+
+
+async def test_check_refund_balance_keeps_seller_rent_exempt():
+    rpc = FakeRpc()
+    rail = _rail(rpc, refund_fee_lamports=5_000)
+    rpc.balance = 1_000_000 - 5_000 + 5_000 + RENT_EXEMPT_MIN_LAMPORTS
+    assert (await rail.check_refund_balance(1_000_000))[0] is True
+    rpc.balance -= 1
+    ok, err = await rail.check_refund_balance(1_000_000)
+    assert ok is False and "SOL balance" in err
+
+
+async def test_find_existing_refund_matches_memo_for_original():
+    rpc = FakeRpc()
+    rail = _rail(rpc)
+    seller = str(rail.pay_to)
+    rpc.pay(source=seller, dest="X", lamports=1, memo=refund_memo("solana:pub:aaaaaaaa", "r", SID))
+    hit = rpc.pay(source=seller, dest="Y", lamports=1, memo=refund_memo("solana:pub:bbbbbbbb", "r", SID))
+    assert await rail.find_existing_refund("solana:pub:bbbbbbbb") == hit
+    assert await rail.find_existing_refund("solana:pub:cccccccc") is None
+
+
+async def test_recover_payment_from_monitor():
+    rpc = FakeRpc()
+    rail = _rail(rpc)
+    rpc.pay(source="buyer", dest=str(rail.pay_to), lamports=77, memo=pay_memo(PUB_NONCE))
+    assert await rail.recover_payment(PUB_NONCE) == ("buyer", 77)
+    assert await rail.recover_payment(f"ffffffff:{SID}") is None
+
+
+async def test_close_stops_monitor_and_rpc():
+    rpc = FakeRpc()
+    rail = _rail(rpc)
+    await rail.start()
+    assert rail.monitor_healthy()
+    await rail.close()
+    assert rpc.closed
+
+
+# ── settings ────────────────────────────────────────────────────────────
+
+def _base_env(monkeypatch):
+    monkeypatch.setenv("AGENT_COMMAND", "true")
+    monkeypatch.setenv("AGENT_CAPABILITY", "x")
+    monkeypatch.setenv("AGENT_NAME", "A")
+    monkeypatch.setenv("AGENT_DESCRIPTION", "d")
+    monkeypatch.setenv("AGENT_ENDPOINT", "https://a.test")
+    monkeypatch.setenv("TON_WALLET_PK", "a" * 64)
+
+
+def test_settings_sol_sku_token(clean_env, monkeypatch):
+    from settings import load_settings
+    _base_env(monkeypatch)
+    kp = Keypair()
+    monkeypatch.setenv("SOL_WALLET_PK", json.dumps(list(bytes(kp))))
+    monkeypatch.setenv("SOL_CLUSTER", "devnet")
+    monkeypatch.setenv("AGENT_SKUS", "basic:inf:ton=1000000000:sol=2000000")
+    s = load_settings(env_file="/nonexistent")
+    assert s.payment_rails == ("TON", "SOL")
+    assert s.skus[0].price_for("SOL") == 2_000_000
+    assert s.skus[0].prices == {"TON": 1_000_000_000, "SOL": 2_000_000}
+    assert s.agent_price_sol == 2_000_000
+    assert s.sol_wallet == str(kp.pubkey())
+    assert (s.sol_commitment, s.sol_refund_fee_lamports) == ("confirmed", 5_000)
+
+
+def test_settings_sol_requires_wallet(clean_env, monkeypatch):
+    from settings import load_settings
+    _base_env(monkeypatch)
+    monkeypatch.setenv("AGENT_SKUS", "basic:inf:ton=1:sol=2")
+    with pytest.raises(RuntimeError, match="SOL rail requires SOL_WALLET_PK"):
+        load_settings(env_file="/nonexistent")
+
+
+def test_settings_sol_dynamic_price_rejected(clean_env, monkeypatch):
+    from settings import load_settings
+    _base_env(monkeypatch)
+    monkeypatch.setenv("SOL_WALLET_PK", json.dumps(list(bytes(Keypair()))))
+    monkeypatch.setenv("AGENT_SKUS", "basic:inf:sol=0")
+    with pytest.raises(RuntimeError, match="sol dynamic pricing"):
+        load_settings(env_file="/nonexistent")
+
+
+def test_settings_sol_commitment_validated(clean_env, monkeypatch):
+    from settings import load_settings
+    _base_env(monkeypatch)
+    monkeypatch.setenv("SOL_WALLET_PK", json.dumps(list(bytes(Keypair()))))
+    monkeypatch.setenv("AGENT_SKUS", "basic:inf:sol=10")
+    monkeypatch.setenv("SOL_COMMITMENT", "processed")
+    with pytest.raises(RuntimeError, match="SOL_COMMITMENT"):
+        load_settings(env_file="/nonexistent")
+    monkeypatch.setenv("SOL_COMMITMENT", "finalized")
+    assert load_settings(env_file="/nonexistent").sol_commitment == "finalized"
+
+
+# ── /invoke end-to-end (fake RPC) ───────────────────────────────────────
+
+def _sol_app(app_factory, rpc: FakeRpc):
+    kp = Keypair()
+    sku = AgentSku(
+        sku_id=DEFAULT_SKU_ID, title=DEFAULT_SKU_ID,
+        price_ton=1_000_000, price_usd=None, initial_stock=None, price_sol=2_000_000,
+    )
+    app = app_factory(
+        skus=(sku,), payment_rails=("TON", "SOL"),
+        sol_wallet_pk=json.dumps(list(bytes(kp))), sol_cluster="devnet",
+    )
+    assert isinstance(app.rails["SOL"], SolRail)
+    app.rails["SOL"] = _rail(rpc, kp=kp)
+    return app
+
+
+async def _preflight_sol_option(c) -> dict[str, Any]:
+    resp = await c.post("/invoke", json={
+        "capability": "translate", "rail": "SOL", "body": {"text": "hi"},
+    })
+    assert resp.status == 402, await resp.text()
+    data = await resp.json()
+    return next(o for o in data["payment_options"] if o["rail"] == "SOL")
+
+
+async def test_invoke_sol_full_flow(app_factory, monkeypatch):
+    import api as api_module
+
+    async def fake_run(**kwargs):
+        return {"result": {"type": "text", "data": "ok"}}
+
+    monkeypatch.setattr(api_module, "run_agent_subprocess", fake_run)
+    rpc = FakeRpc()
+    app = _sol_app(app_factory, rpc)
+    rail = app.rails["SOL"]
+    await rail.monitor.poll()  # health gate needs one fresh poll
+    async with _serve_app(app) as c:
+        opt = await _preflight_sol_option(c)
+        assert opt["address"] == str(rail.pay_to)
+        assert opt["amount"] == "2000000"
+        pub_nonce = extract_pay_nonce(opt["memo"])
+        assert pub_nonce and pub_nonce.endswith(":sid-test")
+        sec = opt["nonce"].split(":")[0][8:]
+        assert sec not in opt["memo"]  # sec never on-chain
+
+        sig = rpc.pay(source="buyer", dest=str(rail.pay_to), lamports=2_000_000, memo=opt["memo"])
+        resp = await c.post("/invoke", json={
+            "capability": "translate", "rail": "SOL", "proof": sig,
+            "nonce": opt["nonce"], "body": {"text": "hi"},
+        })
+        assert resp.status == 200, await resp.text()
+        assert (await resp.json())["status"] == "done"
+        pub = pub_nonce.split(":")[0]
+        assert await app.tx_store.is_processed(f"solana:{sig}")
+        assert await app.tx_store.is_processed(f"solana:pub:{pub}")
+        assert rail.monitor.get(pub_nonce) is None  # consumed after durable write
+
+        replay = await c.post("/invoke", json={
+            "capability": "translate", "rail": "SOL", "proof": sig,
+            "nonce": opt["nonce"], "body": {"text": "hi"},
+        })
+        assert replay.status != 200
+
+
+async def test_invoke_sol_wrong_secret_never_touches_rpc(app_factory):
+    rpc = FakeRpc()
+    app = _sol_app(app_factory, rpc)
+    await app.rails["SOL"].monitor.poll()
+    async with _serve_app(app) as c:
+        opt = await _preflight_sol_option(c)
+        sig = rpc.pay(source="buyer", dest=str(app.rails["SOL"].pay_to),
+                      lamports=2_000_000, memo=opt["memo"])
+        pub = opt["nonce"][:8]
+        forged = f"{pub}deadbeef:sid-test"
+        rpc.tx_calls.clear()
+        resp = await c.post("/invoke", json={
+            "capability": "translate", "rail": "SOL", "proof": sig,
+            "nonce": forged, "body": {"text": "hi"},
+        })
+        assert resp.status == 403
+        assert rpc.tx_calls == []
+        assert not await app.tx_store.is_processed(f"solana:{sig}")
+
+
+async def test_invoke_sol_underpaid_returns_402(app_factory):
+    rpc = FakeRpc()
+    app = _sol_app(app_factory, rpc)
+    await app.rails["SOL"].monitor.poll()
+    async with _serve_app(app) as c:
+        opt = await _preflight_sol_option(c)
+        sig = rpc.pay(source="buyer", dest=str(app.rails["SOL"].pay_to),
+                      lamports=1_999_999, memo=opt["memo"])
+        resp = await c.post("/invoke", json={
+            "capability": "translate", "rail": "SOL", "proof": sig,
+            "nonce": opt["nonce"], "body": {"text": "hi"},
+        })
+        assert resp.status == 402
+        assert "lower" in (await resp.json())["error"]
+
+
+async def test_preflight_503_when_sol_monitor_stale(app_factory):
+    rpc = FakeRpc()
+    app = _sol_app(app_factory, rpc)  # no poll yet → unhealthy
+    async with _serve_app(app) as c:
+        resp = await c.post("/invoke", json={
+            "capability": "translate", "rail": "SOL", "body": {"text": "hi"},
+        })
+        assert resp.status == 503
+
+
+async def test_refund_worker_recovers_and_refunds_sol(app_factory):
+    """Verifier crashed mid-claim: worker recovers sender/amount from the SOL
+    monitor and refunds on Solana, never touching the TON liteserver path."""
+    from api.domain.refund_worker import _process_entry
+
+    rpc = FakeRpc()
+    app = _sol_app(app_factory, rpc)
+    rail = app.rails["SOL"]
+    buyer = Keypair().pubkey()
+    rpc.accounts[str(buyer)] = {"lamports": 1}
+    rpc.pay(source=str(buyer), dest=str(rail.pay_to), lamports=2_000_000, memo=pay_memo(PUB_NONCE))
+    key = "solana:pub:abcd1234"
+    try:
+        await app.refund_queue.enqueue(tx_hash=key, nonce=PUB_NONCE, rail="SOL")
+        entry = await app.refund_queue.get(key)
+        await _process_entry(app, entry)
+        done = await app.refund_queue.get(key)
+        assert done.status == "refunded", done
+        assert done.sender == str(buyer) and done.amount == 2_000_000
+        assert len(rpc.sent) == 1
+    finally:
+        await app.refund_queue.close()
+        await app.tx_store.close()
+

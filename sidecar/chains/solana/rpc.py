@@ -96,3 +96,44 @@ class SolanaRpc:
         if not isinstance(result, dict):
             return None
         return result.get("value")
+
+    async def get_balance(self, pubkey: str, commitment: str = "confirmed") -> int:
+        result = await self.call("getBalance", [pubkey, {"commitment": commitment}])
+        value = result.get("value") if isinstance(result, dict) else result
+        if not isinstance(value, int):
+            raise SolanaRpcError("getBalance returned no value")
+        return value
+
+    async def get_signatures_for_address(
+        self,
+        address: str,
+        *,
+        limit: int = 100,
+        before: str | None = None,
+        until: str | None = None,
+        commitment: str = "confirmed",
+    ) -> list[dict[str, Any]]:
+        """Newest-first signature rows (``signature``/``err``/``memo``/``blockTime``)."""
+        opts: dict[str, Any] = {"limit": limit, "commitment": commitment}
+        if before:
+            opts["before"] = before
+        if until:
+            opts["until"] = until
+        result = await self.call("getSignaturesForAddress", [address, opts])
+        if not isinstance(result, list):
+            raise SolanaRpcError("getSignaturesForAddress returned non-list")
+        return [r for r in result if isinstance(r, dict) and r.get("signature")]
+
+    async def get_transaction(
+        self, signature: str, commitment: str = "confirmed",
+    ) -> dict[str, Any] | None:
+        """jsonParsed transaction, or None while it is not visible at ``commitment``."""
+        result = await self.call(
+            "getTransaction",
+            [signature, {
+                "encoding": "jsonParsed",
+                "commitment": commitment,
+                "maxSupportedTransactionVersion": 0,
+            }],
+        )
+        return result if isinstance(result, dict) else None

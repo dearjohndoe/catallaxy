@@ -42,7 +42,17 @@ the sidecar is the fee payer and publishes. No split-nonce on that path.
 { "rail":"USDC", "address":"<sol_pubkey>", "amount":"<micro-usdc>", "memo":"<nonce>",
   "token":{"symbol":"USDC","mint":"<mint>","decimals":6},
   "network":"solana:…", "extra":{"feePayer":"<sol_pubkey>"}, "sku":"<sku_id>" }
+// SOL (rail_sol.py) — native, buyer broadcasts; ``memo`` is the literal Memo text
+{ "rail":"SOL", "address":"<sol_pubkey>", "amount":"<lamports>",
+  "memo":"CTLX:PAY:<pub>:<sidecar_id>", "network":"mainnet|devnet", "sku":"<sku_id>" }
 ```
+SOL: buyer sends SystemProgram transfer ≥ `amount` + Memo `memo` in one tx,
+then claims `{rail:"SOL", proof:<signature>, nonce:<full nonce>}` (split-nonce,
+same as TON). Verify is by memo `pub` via the sidecar's
+`getSignaturesForAddress` poller; `proof` is only a lookup hint and is accepted
+iff that tx carries the same memo. First tx with a given memo owns it. Refund =
+SOL transfer `amount − SOL_REFUND_FEE_LAMPORTS` + Memo `CTLX:REFUND:{"tx","reason","sidecar_id"}`;
+skipped when it would create a recipient account below rent-exempt (890 880 lamports).
 `memo` = nonce = `{uuid16}:{sidecar_id}` — binds the payment to one order + one agent.
 
 ### `POST /invoke` — claim mode (`{tx, nonce, sku, body}`)
