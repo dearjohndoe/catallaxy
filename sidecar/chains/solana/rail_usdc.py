@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import struct
+import time
 from typing import Any, Callable
 
 from solders.hash import Hash
@@ -27,6 +29,8 @@ from chains.solana.constants import (
     TOKEN_PROGRAM,
     USDC_MINT_DEVNET,
     USDC_MINT_MAINNET,
+    USDC_REFUND_ATA_FEE,
+    USDC_REFUND_FEE,
 )
 from chains.solana.exact import ExactSettler, InspectedExactPayment, inspect_exact
 from chains.solana.refunds import find_refund_signature, refund_memo
@@ -40,6 +44,10 @@ logger = logging.getLogger("sidecar")
 class UsdcRail:
     rail_id = "USDC"
 
+    # No chain watcher here (we broadcast the buyer's tx ourselves), so health
+    # is the RPC we settle through: probed with ``getHealth`` on this cadence.
+    HEALTH_PROBE_INTERVAL = 15.0
+
     def __init__(
         self,
         *,
@@ -49,8 +57,12 @@ class UsdcRail:
         mint: str | None = None,
         settler: ExactSettler | None = None,
         get_sidecar_id: Callable[[], str] = lambda: "",
+        refund_fee: int = USDC_REFUND_FEE,
+        refund_ata_fee: int = USDC_REFUND_ATA_FEE,
     ) -> None:
         self._kp = keypair
+        self._refund_fee = refund_fee
+        self._refund_ata_fee = refund_ata_fee
         self._rpc = rpc
         self.cluster = "devnet" if cluster == "devnet" else "mainnet"
         self.mint = Pubkey.from_string(
@@ -60,6 +72,35 @@ class UsdcRail:
         self.pay_to = keypair.pubkey()
         self._settler = settler or ExactSettler(keypair=keypair, rpc=rpc)
         self._get_sidecar_id = get_sidecar_id
+        self._last_ok_at: float = 0.0
+        self._stop = asyncio.Event()
+        self._probe_task: asyncio.Task[None] | None = None
+
+    # ── lifecycle ────────────────────────────────────────────────────────
+
+    async def start(self) -> None:
+        await self.probe()
+        self._stop = asyncio.Event()
+        self._probe_task = asyncio.create_task(self._probe_loop())
+
+    async def probe(self) -> bool:
+        """One ``getHealth``; a node that is behind or unreachable is unhealthy."""
+        ok = await self._rpc.get_health()
+        if ok:
+            self._last_ok_at = time.time()
+        return ok
+
+    async def _probe_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self.HEALTH_PROBE_INTERVAL)
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await self.probe()
+            except Exception:
+                logger.exception("USDC rail: RPC health probe failed")
 
     @property
     def fee_payer(self) -> str:
@@ -86,12 +127,22 @@ class UsdcRail:
     async def refund(
         self, to: str, amount: int, *, original_tx_hash: str, reason: str,
     ) -> str | None:
-        if amount <= 0:
-            logger.warning("USDC refund skipped: amount <= 0 tx=%s", original_tx_hash)
-            return None
+        """Refund ``amount`` minus the fixed fee (plus the account-creation fee
+        when the buyer's USDC account is gone). Skipped (None) when the fee
+        eats the whole amount — the worker treats that as final."""
         try:
+            dest = get_associated_token_address(Pubkey.from_string(to), self.mint, TOKEN_PROGRAM)
+            dest_exists = await self._rpc.get_account_info(str(dest)) is not None
+            fee = self._refund_fee + (0 if dest_exists else self._refund_ata_fee)
+            refund_amount = amount - fee
+            if refund_amount <= 0:
+                logger.warning(
+                    "USDC refund skipped: amount %s <= fee %s (buyer account %s) tx=%s",
+                    amount, fee, "exists" if dest_exists else "missing", original_tx_hash,
+                )
+                return None
             memo = refund_memo(original_tx_hash, reason, self._get_sidecar_id())
-            return await self._send_usdc(to, amount, memo)
+            return await self._send_usdc(to, refund_amount, memo, dest_exists=dest_exists)
         except Exception:
             logger.exception("Failed to send USDC refund tx=%s", original_tx_hash)
             return None
@@ -122,13 +173,22 @@ class UsdcRail:
         )
 
     def monitor_healthy(self, max_age_seconds: float = 60.0) -> bool:
-        # No watcher: we publish the tx ourselves. Unreachable RPC fails at settle.
-        return True
+        """Fresh successful ``getHealth`` within ``max_age_seconds``. Unstarted
+        rail is never healthy, same as the TON verifiers."""
+        return self._last_ok_at > 0 and time.time() - self._last_ok_at <= max_age_seconds
 
     async def consume(self, nonce: str) -> None:
         return None
 
     async def close(self) -> None:
+        self._stop.set()
+        if self._probe_task is not None:
+            self._probe_task.cancel()
+            try:
+                await self._probe_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._probe_task = None
         await self._rpc.close()
 
     # ── refund-worker hooks (rail-generic in refund_worker) ──────────────
@@ -153,7 +213,9 @@ class UsdcRail:
     async def find_existing_refund(self, original_tx_hash: str) -> str | None:
         return await find_refund_signature(self._rpc, str(self.pay_to), original_tx_hash)
 
-    async def _send_usdc(self, owner_b58: str, amount: int, memo: str | None = None) -> str:
+    async def _send_usdc(
+        self, owner_b58: str, amount: int, memo: str | None = None, *, dest_exists: bool | None = None,
+    ) -> str:
         dest_owner = Pubkey.from_string(owner_b58)
         src = get_associated_token_address(self.pay_to, self.mint, TOKEN_PROGRAM)
         dest = get_associated_token_address(dest_owner, self.mint, TOKEN_PROGRAM)
@@ -161,8 +223,9 @@ class UsdcRail:
             set_compute_unit_limit(100_000),  # ATA create + transfer + memo
             set_compute_unit_price(1),
         ]
-        dest_info = await self._rpc.get_account_info(str(dest))
-        if dest_info is None:
+        if dest_exists is None:
+            dest_exists = await self._rpc.get_account_info(str(dest)) is not None
+        if not dest_exists:
             ixs.append(
                 Instruction(
                     ASSOCIATED_TOKEN_PROGRAM,

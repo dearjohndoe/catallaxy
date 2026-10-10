@@ -56,8 +56,8 @@ class SolanaRpc:
         try:
             result = await self.call("getHealth")
             return result == "ok"
-        except Exception:
-            logger.warning("solana getHealth failed", exc_info=True)
+        except Exception as exc:
+            logger.warning("solana getHealth failed: %s", exc)
             return False
 
     async def send_transaction(self, tx_b64: str) -> str:

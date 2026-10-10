@@ -24,7 +24,9 @@ from chains.solana.constants import (
     CU_LIMIT_DISC,
     CU_PRICE_DISC,
     LIGHTHOUSE_PROGRAM,
+    MAX_CU_LIMIT,
     MAX_CU_PRICE_MICROLAMPORTS,
+    MAX_PRIORITY_FEE_LAMPORTS,
     MEMO_PROGRAM,
     SETTLE_CACHE_TTL_SECONDS,
     TOKEN_2022_PROGRAM,
@@ -100,6 +102,12 @@ def _decode_cu_price(data: bytes) -> int:
     return int(struct.unpack_from("<Q", data, 1)[0])
 
 
+def _decode_cu_limit(data: bytes) -> int:
+    if len(data) < 5 or data[0] != CU_LIMIT_DISC:
+        raise PaymentVerificationError("invalid compute unit limit instruction")
+    return int(struct.unpack_from("<I", data, 1)[0])
+
+
 def _decode_transfer_checked(data: bytes) -> tuple[int, int]:
     if len(data) < 10 or data[0] != TRANSFER_CHECKED_DISC:
         raise PaymentVerificationError("expected TransferChecked")
@@ -155,7 +163,18 @@ def inspect_exact(
         raise PaymentVerificationError("instruction 1 must be SetComputeUnitPrice")
     cu_price = _decode_cu_price(d1)
     if cu_price > MAX_CU_PRICE_MICROLAMPORTS:
-        raise PaymentVerificationError("compute unit price exceeds cap")
+        raise PaymentVerificationError(
+            f"compute unit price exceeds cap ({cu_price} > {MAX_CU_PRICE_MICROLAMPORTS} µlamports)"
+        )
+    # We are the fee payer: bound what the client can make us spend.
+    cu_limit = _decode_cu_limit(d0)
+    if cu_limit > MAX_CU_LIMIT:
+        raise PaymentVerificationError(f"compute unit limit exceeds cap ({cu_limit} > {MAX_CU_LIMIT})")
+    priority_fee = -(-cu_limit * cu_price // 1_000_000)  # runtime rounds up
+    if priority_fee > MAX_PRIORITY_FEE_LAMPORTS:
+        raise PaymentVerificationError(
+            f"priority fee exceeds cap ({priority_fee} > {MAX_PRIORITY_FEE_LAMPORTS} lamports)"
+        )
 
     p2 = _program_id(tx, ixs[2].program_id_index)
     if p2 not in _TOKEN_PROGRAMS:
@@ -294,7 +313,9 @@ class ExactSettler:
                 if status.get("err"):
                     raise PaymentVerificationError(f"settlement failed on-chain: {status['err']}")
                 conf = status.get("confirmationStatus") or ""
-                if conf in ("confirmed", "finalized") or status.get("confirmations") is not None:
+                # Not `confirmations is not None`: that is set already at
+                # "processed", which one RPC node alone has seen.
+                if conf in ("confirmed", "finalized"):
                     return
             await asyncio.sleep(0.4)
         raise PaymentVerificationError("settlement not confirmed in time")

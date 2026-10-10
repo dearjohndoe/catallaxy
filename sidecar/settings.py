@@ -138,6 +138,10 @@ class Settings:
     # Native SOL rail: lamports kept from each refund (buyer pays the tx fee,
     # like refund_fee_nanoton on TON) and the commitment we deliver on.
     sol_refund_fee_lamports: int = 5_000
+    # USDC rail: micro-USDC kept from each refund, and extra when the refund
+    # has to recreate the buyer's USDC account (rent paid by the seller).
+    sol_usdc_refund_fee: int = 5_000
+    sol_usdc_refund_ata_fee: int = 200_000
     sol_commitment: str = "confirmed"
     # Solana discovery registry wallet. None → no Solana heartbeat (mainnet has
     # no default yet).
@@ -483,6 +487,10 @@ def load_settings(env_file: str | None = None) -> Settings:
     sol_refund_fee_lamports = int(_chain_env("SOL", "REFUND_FEE_LAMPORTS") or "5000")
     if sol_refund_fee_lamports < 0:
         raise RuntimeError("SOL_REFUND_FEE_LAMPORTS must be >= 0")
+    sol_usdc_refund_fee = int(_chain_env("SOL", "USDC_REFUND_FEE") or "5000")
+    sol_usdc_refund_ata_fee = int(_chain_env("SOL", "USDC_REFUND_ATA_FEE") or "200000")
+    if sol_usdc_refund_fee < 0 or sol_usdc_refund_ata_fee < 0:
+        raise RuntimeError("SOL_USDC_REFUND_FEE / SOL_USDC_REFUND_ATA_FEE must be >= 0")
     if sol_wallet_pk:
         from chains.solana.wallet import parse_solana_keypair
         sol_wallet = str(parse_solana_keypair(sol_wallet_pk).pubkey())
@@ -575,6 +583,8 @@ def load_settings(env_file: str | None = None) -> Settings:
         agent_price_usdc=agent_price_usdc,
         agent_price_sol=agent_price_sol,
         sol_refund_fee_lamports=sol_refund_fee_lamports,
+        sol_usdc_refund_fee=sol_usdc_refund_fee,
+        sol_usdc_refund_ata_fee=sol_usdc_refund_ata_fee,
         sol_commitment=sol_commitment,
         sol_registry_address=sol_registry_address,
     )

@@ -66,12 +66,16 @@ async def _parse_invoke_request(
 ) -> ParsedInvoke | web.Response:
     try:
         if request.content_type and "multipart/form-data" in request.content_type:
-            tx_hash, nonce, capability, quote_id, rail, sku_field, body, uploaded_files = \
+            tx_hash, nonce, capability, quote_id, raw_rail, sku_field, body, uploaded_files = \
                 await parse_multipart_invoke(request, file_store_dir)
+            header_proof = extract_header_proof(request.headers)
+            rail = raw_rail or ("USDC" if header_proof else "TON")
             return ParsedInvoke(
-                tx_hash=tx_hash, nonce=nonce, capability=capability,
+                tx_hash=tx_hash or header_proof or "", nonce=nonce, capability=capability,
                 quote_id=quote_id, rail=rail, sku_field=sku_field,
                 body=body, payload={"body": body}, uploaded_files=uploaded_files,
+                x402=bool(header_proof) or rail == "USDC",
+                rail_explicit=bool(raw_rail) or bool(header_proof),
             )
         data = await request.json()
         # v2 canonical field is ``proof``; ``tx`` is the CTLX/1 alias.

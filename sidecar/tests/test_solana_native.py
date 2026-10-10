@@ -940,7 +940,7 @@ async def test_usdc_refund_carries_refund_memo_and_is_found_for_dedup():
     kp = Keypair()
     rail = _usdc_rail(rpc, kp)
     buyer = str(Keypair().pubkey())
-    sig = await rail.refund(buyer, 1_000, original_tx_hash="solana:abc", reason="agent_failed")
+    sig = await rail.refund(buyer, 1_000_000, original_tx_hash="solana:abc", reason="agent_failed")
     assert sig is not None
     msg = _decode_sent(rpc.sent[0]).message
     keys = list(msg.account_keys)
@@ -950,6 +950,47 @@ async def test_usdc_refund_carries_refund_memo_and_is_found_for_dedup():
     rpc.rows.insert(0, {"signature": sig, "err": None, "memo": f"[80] {memos[0]}"})
     assert await rail.find_existing_refund("solana:abc") == sig
     assert await rail.find_existing_refund("solana:other") is None
+
+
+def _transfer_checked_amount(msg) -> int:
+    import struct as _struct
+    keys = list(msg.account_keys)
+    for ix in msg.instructions:
+        data = bytes(ix.data)
+        if str(keys[ix.program_id_index]) == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" and data[0] == 12:
+            return _struct.unpack_from("<Q", data, 1)[0]
+    raise AssertionError("no TransferChecked")
+
+
+async def test_usdc_refund_keeps_fixed_fee():
+    from solders.token.associated import get_associated_token_address
+    from solders.pubkey import Pubkey
+    from chains.solana.constants import TOKEN_PROGRAM, USDC_MINT_DEVNET
+
+    rpc = FakeRpc()
+    rail = _usdc_rail(rpc)
+    buyer = Keypair().pubkey()
+    ata = get_associated_token_address(buyer, Pubkey.from_string(USDC_MINT_DEVNET), TOKEN_PROGRAM)
+    rpc.accounts[str(ata)] = {"lamports": 2_039_280}
+    assert await rail.refund(str(buyer), 10_000, original_tx_hash="solana:a", reason="x") is not None
+    assert _transfer_checked_amount(_decode_sent(rpc.sent[-1]).message) == 10_000 - 5_000
+    # Fee eats the whole amount: no refund at all.
+    n = len(rpc.sent)
+    assert await rail.refund(str(buyer), 5_000, original_tx_hash="solana:b", reason="x") is None
+    assert len(rpc.sent) == n
+
+
+async def test_usdc_refund_charges_account_recreation():
+    """Buyer closed their USDC account: the seller pays its rent, the buyer is
+    charged the extra fee; below it the refund is skipped."""
+    rpc = FakeRpc()
+    rail = _usdc_rail(rpc)
+    buyer = str(Keypair().pubkey())
+    assert await rail.refund(buyer, 1_000_000, original_tx_hash="solana:a", reason="x") is not None
+    assert _transfer_checked_amount(_decode_sent(rpc.sent[-1]).message) == 1_000_000 - 205_000
+    n = len(rpc.sent)
+    assert await rail.refund(buyer, 100_000, original_tx_hash="solana:b", reason="x") is None
+    assert len(rpc.sent) == n
 
 
 async def test_refund_worker_usdc_never_touches_ton(app_factory, monkeypatch):

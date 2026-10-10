@@ -104,12 +104,13 @@ async def startup(app: "SidecarApp") -> None:
         except Exception:
             logger.exception("PaymentVerifier failed to start")
 
-    sol_rail = app.rails.get("SOL")
-    if sol_rail is not None:
-        try:
-            await sol_rail.start()
-        except Exception:
-            logger.exception("SOL rail monitor failed to start")
+    for rail_id in ("SOL", "USDC"):
+        sol_rail = app.rails.get(rail_id)
+        if sol_rail is not None:
+            try:
+                await sol_rail.start()
+            except Exception:
+                logger.exception("%s rail monitor failed to start", rail_id)
 
     if app.jetton_verifier:
         try:

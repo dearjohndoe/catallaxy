@@ -383,3 +383,32 @@ async def test_solana_only_invoke_defaults_to_sol_and_rejects_ton(app_factory):
         assert info["payment_rails"] == ["SOL"]
         assert info["skus"][0]["price_sol"] == 2_000_000
         assert "price_ton" not in info["skus"][0]
+
+
+async def test_multipart_invoke_reads_x402_header_and_default_rail(app_factory):
+    """The web frontend posts multipart: an x402 header there must reach the
+    USDC path, and a missing ``rail`` field must not force TON."""
+    from aiohttp import FormData
+
+    sku = AgentSku(
+        sku_id=DEFAULT_SKU_ID, title=DEFAULT_SKU_ID, price_ton=None, price_usd=None,
+        initial_stock=None, price_sol=2_000_000, price_usdc=10_000,
+    )
+    app = _sol_only_app(app_factory, skus=(sku,), payment_rails=("SOL", "USDC"), agent_price_usdc=10_000)
+    app.rails["SOL"].monitor_healthy = lambda max_age_seconds=60.0: True
+    app.rails["USDC"].monitor_healthy = lambda max_age_seconds=60.0: True
+
+    def form() -> FormData:
+        f = FormData()
+        f.add_field("capability", "translate")
+        f.add_field("body_json", json.dumps({"text": "hi"}), content_type="application/json")  # forces multipart
+        return f
+
+    async with _serve_app(app) as c:
+        pre = await c.post("/invoke", data=form())
+        assert pre.status == 402, await pre.text()
+        assert {o["rail"] for o in (await pre.json())["payment_options"]} == {"SOL", "USDC"}
+
+        bad = await c.post("/invoke", data=form(), headers={"PAYMENT-SIGNATURE": "e30="})
+        assert bad.status == 402
+        assert "x402" in (await bad.json())["error"]  # inspected as x402, not "nonce is required"

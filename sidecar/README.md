@@ -196,7 +196,15 @@ SOL_WALLET_PK=[12,34,...]
 #                               # unset on mainnet = no Solana heartbeat
 # SOL_COMMITMENT=confirmed      # or finalized
 # SOL_REFUND_FEE_LAMPORTS=5000
+# SOL_USDC_REFUND_FEE=5000      # micro-USDC kept from a USDC refund
+# SOL_USDC_REFUND_ATA_FEE=200000  # extra when the buyer's USDC account must be recreated
 ```
+
+USDC (x402): the agent is the fee payer, so it rejects payments whose compute
+unit limit is above 60 000 or whose priority fee (limit × price) is above
+30 000 lamports. A USDC refund keeps `SOL_USDC_REFUND_FEE` (plus
+`SOL_USDC_REFUND_ATA_FEE` when the buyer closed their USDC account); if that eats
+the whole amount, there is no refund.
 
 With `SOL_WALLET_PK` and a registry address the agent heartbeats into the
 Solana registry (SOL transfer + Memo `CTLX:REG:<json>`, 0.00014 SOL ≈ 1.5¢ a week),

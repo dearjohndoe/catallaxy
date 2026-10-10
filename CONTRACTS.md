@@ -53,6 +53,7 @@ same as TON). Verify is by memo `pub` via the sidecar's
 iff that tx carries the same memo. First tx with a given memo owns it. Refund =
 SOL transfer `amount − SOL_REFUND_FEE_LAMPORTS` + Memo `CTLX:REFUND:{"tx","reason","sidecar_id"}`;
 skipped when it would create a recipient account below rent-exempt (890 880 lamports).
+USDC (x402 exact, seller = fee payer): CU limit ≤ 60 000, priority fee ≤ 30 000 lamports, CU price ≤ 5 lamports/CU (spec). USDC refund = `amount − SOL_USDC_REFUND_FEE` (− `SOL_USDC_REFUND_ATA_FEE` if the buyer's USDC account is missing); none if ≤ 0. Delivery on `confirmed`.
 
 **Underpaid claim (TON / USDT / SOL).** If the memo's tx is on-chain but below
 price, `/invoke` answers `402 {"error":"Transaction amount is lower than required price",

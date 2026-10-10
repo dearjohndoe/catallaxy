@@ -24,7 +24,23 @@ V1_NETWORK_DEVNET = frozenset({"solana-devnet", "solana:devnet", CAIP2_DEVNET})
 TRANSFER_CHECKED_DISC = 12
 CU_LIMIT_DISC = 2
 CU_PRICE_DISC = 3
-MAX_CU_PRICE_MICROLAMPORTS = 5
+# x402 exact SVM: "≤ 5 lamports per compute unit" (= 5_000_000 µlamports). Wallets
+# (Phantom, Solflare) set their own priority fee when signing, so a tighter cap
+# rejects real wallets. The seller pays it (fee payer): at most limit × 5 lamports.
+MAX_CU_PRICE_MICROLAMPORTS = 5_000_000
+# Stricter than the spec (allowed: "MAY introduce stricter limits"): the spec
+# leaves the CU limit open, so a client could make the seller pay up to
+# 1.4M CU × 5 lamports ≈ 0.007 SOL per payment. TransferChecked uses ~400 CU,
+# wallet Lighthouse asserts a few thousand; clients default to 20k.
+MAX_CU_LIMIT = 60_000
+# Cap on the priority fee the seller pays (limit × price): a Solflare-signed
+# devnet payment came in at 5_000 lamports.
+MAX_PRIORITY_FEE_LAMPORTS = 30_000
+# USDC refunds keep a fixed fee (micro-USDC): the seller paid SOL to settle the
+# payment and pays again to refund it. More when the buyer's USDC account is
+# gone and the refund must recreate it (~0.0015 SOL rent). Env-overridable.
+USDC_REFUND_FEE = 5_000
+USDC_REFUND_ATA_FEE = 200_000
 SETTLE_CACHE_TTL_SECONDS = 120
 DEFAULT_RPC_MAINNET = "https://api.mainnet-beta.solana.com"
 DEFAULT_RPC_DEVNET = "https://api.devnet.solana.com"

@@ -151,6 +151,8 @@ class SidecarApp:
                     cluster=settings.sol_cluster,
                     mint=settings.sol_usdc_mint,
                     get_sidecar_id=lambda: self.sidecar_id,
+                    refund_fee=settings.sol_usdc_refund_fee,
+                    refund_ata_fee=settings.sol_usdc_refund_ata_fee,
                 )
             if "SOL" in sol_rails:
                 self.rails["SOL"] = SolRail(
