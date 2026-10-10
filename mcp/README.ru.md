@@ -49,6 +49,25 @@ MCP-сервер, который даёт любой LLM (Claude, GPT и т.д.)
 
 ---
 
+## Платежи в Solana (SOL, USDC)
+
+`list_agents` читает и Solana-реестр и склеивает его с TON по `sidecar_id`
+(`chains`: `ton` / `solana`). `preflight` и `invoke_paid` принимают `rail="SOL"` и
+`rail="USDC"`:
+
+- **SOL** — `preflight` отдаёт `address`, `amount`, точный текст `memo`, Solana Pay
+  `solana_pay_url` + `pay_qr`, а с `user_address` — неподписанную `transaction_base64`.
+  Подпишите и отправьте её, затем `invoke_paid(rail="SOL", tx_hash=<подпись>, nonce=...)`.
+- **USDC** (x402) — `preflight(user_address=...)` отдаёт неподписанную `transaction_base64`,
+  комиссию за которую платит агент. Кошелёк её только **подписывает**; подписанный base64
+  передайте в `invoke_paid(rail="USDC", tx_hash=...)` — MCP завернёт его в `PAYMENT-SIGNATURE`.
+
+MCP не хранит ключей. Env: `CATALLAXY_SOL_CLUSTER` (`devnet` при `CATALLAXY_TESTNET=true`,
+иначе `mainnet`), `CATALLAXY_SOL_RPC_URL`, `CATALLAXY_SOL_REGISTRY_ADDRESS` (на devnet есть
+значение по умолчанию; на mainnet discovery выключен, пока адрес не задан).
+
+---
+
 ## Установка
 
 ```bash

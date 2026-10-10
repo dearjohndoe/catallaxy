@@ -3,6 +3,14 @@ from urllib.parse import quote
 import aiohttp
 from mcp.server.fastmcp import FastMCP
 from lib.cell_builder import build_payment_cell, build_jetton_transfer_cell
+from lib.solana import (
+    build_sol_payment_tx,
+    build_x402_usdc_tx,
+    lamports_to_sol,
+    micro_to_usdc,
+    solana_pay_url,
+    x402_payment_header,
+)
 
 def _ascii_qr(data: str) -> str:
     """Render a payment URL as a scannable ASCII/Unicode QR code.
@@ -40,11 +48,23 @@ def register_invocation_tools(mcp: FastMCP) -> None:
         user_address: str | None = None,
         sku: str | None = None,
     ) -> dict:
-        """Initiate agent call: get payment details and build Cell payload for @ton/mcp.
+        """Initiate agent call: get payment details and a ready payment payload.
 
-        rail: "TON" (default) or "USDT".
+        rail: "TON" (default), "USDT", "SOL" (native SOL on Solana) or "USDC"
+        (USDC on Solana via x402). Pick one of the agent's `payment_rails`.
         sku: optional SKU id — required if the agent exposes multiple SKUs without a quote_id.
         user_address: required when rail="USDT" — your wallet address (for USDT refunds).
+            For rail="SOL"/"USDC": your Solana wallet address (base58). Optional for
+            SOL (adds an unsigned transaction to sign+send), required for USDC.
+
+        SOL: send `amount` lamports to `address` with a Memo instruction whose text is
+        exactly `memo` (`solana_pay_url` / `pay_qr` do that in any Solana Pay wallet),
+        then invoke_paid(rail="SOL", tx_hash=<signature>, nonce=<this nonce>).
+
+        USDC (x402 exact): your wallet only SIGNS `transaction_base64` (do NOT send it —
+        the agent co-signs as fee payer and broadcasts), then invoke_paid(rail="USDC",
+        tx_hash=<signed transaction, base64>). Any x402 client can instead answer the
+        standard 402 (`accepts`) on its own.
         Returns payment_options (all available rails) plus ready-to-use payload for chosen rail.
 
         For the TON rail the result also includes ready-to-sign deeplinks (pay_url,
@@ -116,7 +136,57 @@ def register_invocation_tools(mcp: FastMCP) -> None:
             "payment_options": payment_options,
         }
 
-        if rail == "USDT":
+        if rail == "SOL":
+            address = opt.get("address", "")
+            lamports = int(opt.get("amount", 0))
+            pay_url = solana_pay_url(address, lamports, memo)
+            result.update({
+                "address": address,
+                "amount": str(lamports),
+                "amount_sol": lamports_to_sol(lamports),
+                "memo": memo,
+                "solana_pay_url": pay_url,
+                "pay_qr": _ascii_qr(pay_url),
+                "warning": (
+                    "The Memo instruction text must be exactly `memo` (it carries only the "
+                    "public half). Never put `nonce` on-chain — it is for invoke_paid only."
+                ),
+                "how_to_pay": (
+                    "If you control a Solana wallet, sign and send `transaction_base64` "
+                    "(or a transfer + memo of your own), then call invoke_paid with "
+                    "rail='SOL', tx_hash=<transaction signature> and this response's `nonce`. "
+                    "Otherwise show the user pay_qr / solana_pay_url."
+                ),
+            })
+            if user_address:
+                result["transaction_base64"] = await build_sol_payment_tx(
+                    user_address, address, lamports, memo,
+                )
+        elif rail == "USDC":
+            accepted = next(
+                (a for a in data.get("accepts") or [] if str(a.get("network", "")).startswith("solana")),
+                None,
+            )
+            if accepted is None:
+                raise ValueError("Agent offered USDC without x402 requirements (accepts[])")
+            amount = int(accepted.get("amount") or accepted.get("maxAmountRequired") or 0)
+            result.update({
+                "x402_accepted": accepted,
+                "amount": str(amount),
+                "amount_usdc": micro_to_usdc(amount),
+                "fee_payer": (accepted.get("extra") or {}).get("feePayer"),
+                "how_to_pay": (
+                    "Have the payer's Solana wallet SIGN (not send) `transaction_base64`; "
+                    "the seller pays the network fee and broadcasts it. Then call "
+                    "invoke_paid with rail='USDC' and tx_hash=<the signed transaction, "
+                    "base64>. No nonce is needed. The payer needs a USDC token account "
+                    "holding at least `amount_usdc`."
+                ),
+            })
+            if not user_address:
+                raise ValueError("user_address required for USDC rail (the payer's Solana address)")
+            result["transaction_base64"] = await build_x402_usdc_tx(user_address, accepted)
+        elif rail == "USDT":
             agent_address = opt.get("address", "")
             usdt_amount = int(opt.get("amount", 0))
             if not user_address:
@@ -205,17 +275,26 @@ def register_invocation_tools(mcp: FastMCP) -> None:
         poll_timeout: int = 300,
         sku: str | None = None,
     ) -> dict:
-        """Call agent with proof of payment (TX hash from @ton/mcp).
+        """Call agent with proof of payment.
 
         Sends both `proof` (v2) and `tx` (CTLX/1 alias) so either sidecar version works.
-        rail: "TON" (default) or "USDT" — must match the rail used in preflight.
+        rail: "TON" (default), "USDT", "SOL" or "USDC" — must match the rail used in preflight.
+        tx_hash: TON/USDT — the TX hash; SOL — the transaction signature (base58);
+            USDC — the wallet-SIGNED x402 transaction (base64) from preflight's
+            `transaction_base64`; it is sent as the x402 `PAYMENT-SIGNATURE` header,
+            and `nonce` may be empty.
         nonce: the full claim value from preflight's `nonce` field (NOT `memo` —
             `memo` is only the public half embedded in the on-chain payload; this
             claim step needs the longer `nonce` value, which never went on-chain).
         sku: optional SKU id — must match the one used in preflight/quote.
         """
+        headers: dict[str, str] = {}
+        proof = tx_hash
+        if rail.upper() == "USDC":
+            proof = x402_payment_header(tx_hash)
+            headers["PAYMENT-SIGNATURE"] = proof
         payload: dict = {
-            "proof": tx_hash, "tx": tx_hash,
+            "proof": proof, "tx": proof,
             "nonce": nonce, "capability": capability, "body": body, "rail": rail,
         }
         if quote_id:
@@ -226,6 +305,7 @@ def register_invocation_tools(mcp: FastMCP) -> None:
             async with session.post(
                 f"{endpoint}/invoke",
                 json=payload,
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=60),
             ) as resp:
                 http_status = resp.status

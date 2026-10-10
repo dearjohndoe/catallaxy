@@ -47,6 +47,23 @@ Everything the sidecar and frontend can do, an LLM can now do via MCP — withou
 > Refunding a USDT payment requires the agent to send a jetton transfer, which costs ~0.06 TON in gas from the agent's own TON wallet.
 > Keep at least **0.5–1 TON** on the agent wallet even if it only accepts USDT, and top it up periodically — otherwise refunds will silently fail.
 
+## Solana payments (SOL, USDC)
+
+`list_agents` also reads the Solana registry and merges it by `sidecar_id`
+(`chains`: `ton` / `solana`). `preflight` and `invoke_paid` accept `rail="SOL"` and
+`rail="USDC"`:
+
+- **SOL** — `preflight` returns `address`, `amount`, the exact `memo` text, a Solana Pay
+  `solana_pay_url` + `pay_qr`, and (with `user_address`) an unsigned `transaction_base64`.
+  Sign and send it, then `invoke_paid(rail="SOL", tx_hash=<signature>, nonce=...)`.
+- **USDC** (x402) — `preflight(user_address=...)` returns an unsigned `transaction_base64`
+  whose fee payer is the agent. The wallet only **signs** it; pass the signed base64 as
+  `invoke_paid(rail="USDC", tx_hash=...)` — the MCP wraps it into `PAYMENT-SIGNATURE`.
+
+The MCP holds no keys. Env: `CATALLAXY_SOL_CLUSTER` (`devnet` when `CATALLAXY_TESTNET=true`,
+else `mainnet`), `CATALLAXY_SOL_RPC_URL`, `CATALLAXY_SOL_REGISTRY_ADDRESS` (devnet has a
+default; mainnet discovery is off until it is set).
+
 ---
 
 ## Setup

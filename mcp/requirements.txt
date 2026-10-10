@@ -2,3 +2,4 @@ mcp>=1.0.0
 aiohttp>=3.9.0
 pytoniq-core>=0.1.36
 python-dotenv>=1.0.0
+solders>=0.26,<0.27
