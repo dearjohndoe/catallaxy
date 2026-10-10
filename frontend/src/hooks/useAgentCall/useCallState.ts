@@ -17,6 +17,7 @@ export function useCallState(agent: Agent) {
   const [paymentOptions, setPaymentOptions] = useState<PaymentOption[]>([])
   const [selectedRail, setSelectedRail] = useState<string>(() => agentRails(agent)[0] ?? 'TON')
   const [paymentRails, setPaymentRails] = useState<string[]>([])
+  const [unavailableRails, setUnavailableRails] = useState<string[]>([])
   const [connMode, setConnMode] = useState<ConnectionMode>(() => getConnectionMode(agent.endpoint))
   const [skus, setSkus] = useState<Sku[]>([])
   const [selectedSkuId, setSelectedSkuId] = useState<string>('')
@@ -40,6 +41,7 @@ export function useCallState(agent: Agent) {
     paymentOptions, setPaymentOptions,
     selectedRail, setSelectedRail,
     paymentRails, setPaymentRails,
+    unavailableRails, setUnavailableRails,
     connMode, setConnMode,
     skus, setSkus,
     selectedSkuId, setSelectedSkuId,

@@ -511,6 +511,11 @@ body {
 .rail-option input[type="radio"]:disabled + span {
   opacity: 0.4; cursor: not-allowed;
 }
+.rail-unavailable-note {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
 
 /* ── SKU selector ── */
 .sku-selector {

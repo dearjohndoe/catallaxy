@@ -135,6 +135,7 @@ export function AgentItem({ agent, expanded, onToggle, locked }: Props) {
                 selected={call.selectedRail}
                 onSelect={call.setSelectedRail}
                 disabled={call.busy}
+                unavailable={call.unavailableRails}
               />
               <div className="alert alert-info">
                 {solanaRail
@@ -266,6 +267,7 @@ export function AgentItem({ agent, expanded, onToggle, locked }: Props) {
                     selected={call.selectedRail}
                     onSelect={call.setSelectedRail}
                     disabled={call.busy}
+                    unavailable={call.unavailableRails}
                   />
                   <button type="submit" className="btn btn-primary" disabled={submitDisabled || call.quoteSecondsLeft === 0}>
                     {call.status === 'paying' ? 'Waiting for payment…'
@@ -294,6 +296,7 @@ export function AgentItem({ agent, expanded, onToggle, locked }: Props) {
                     selected={call.selectedRail}
                     onSelect={call.setSelectedRail}
                     disabled={call.busy}
+                    unavailable={call.unavailableRails}
                   />
                   <button type="submit" className="btn btn-primary" disabled={submitDisabled}>
                     {call.status === 'paying' ? 'Waiting for payment…'

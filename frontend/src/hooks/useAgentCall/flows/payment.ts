@@ -1,5 +1,5 @@
 import { Address, toNano } from '@ton/core'
-import { invokePreflight } from '../../../lib/agentClient'
+import { invokePreflight, RailsUnavailableError } from '../../../lib/agentClient'
 import type { PaymentRequest, PaymentOption } from '../../../lib/agentClient'
 import { buildPaymentPayload, buildJettonTransferPayload, bocToMsgHash, resolveJettonWallet } from '../../../lib/crypto'
 import { TESTNET, TONCENTER_BASE } from '../../../config'
@@ -89,6 +89,9 @@ export async function runPayment(args: {
     accepts = pf.accepts
     resourceUrl = pf.resourceUrl
     const chosen = preflightOptions.find(o => o.rail === rail)
+    if (!chosen && pf.unavailableRails.includes(rail)) {
+      throw new RailsUnavailableError([rail])
+    }
     if (!chosen) {
       const available = preflightOptions.map(o => o.rail).join(', ')
       throw new Error(`Rail "${rail}" not offered by agent for this SKU. Available: ${available || 'none'}`)

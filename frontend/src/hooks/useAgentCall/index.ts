@@ -134,6 +134,7 @@ export function useAgentCall(
     paymentOptions: s.paymentOptions,
     selectedRail: s.selectedRail, setSelectedRail: s.setSelectedRail,
     paymentRails: s.paymentRails,
+    unavailableRails: s.unavailableRails,
     skus: s.skus, skusLoading: s.skusLoading,
     selectedSkuId: s.selectedSkuId, setSelectedSkuId: s.setSelectedSkuId,
     selectedSku,

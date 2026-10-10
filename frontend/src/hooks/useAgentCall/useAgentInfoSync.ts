@@ -14,9 +14,11 @@ export function useAgentInfoSync(endpoint: string, sidecarId: string, expanded: 
         if (cancelled) return
         s.setSkus(info.skus)
         s.setPaymentRails(info.paymentRails)
+        s.setUnavailableRails(info.unavailableRails)
         if (info.paymentRails.length > 0) {
+          const usable = info.paymentRails.filter(r => !info.unavailableRails.includes(r))
           s.setSelectedRail(prev =>
-            info.paymentRails.includes(prev) ? prev : (info.paymentRails[0] ?? 'TON')
+            usable.includes(prev) ? prev : (usable[0] ?? info.paymentRails[0] ?? 'TON')
           )
         }
         const firstAvail = info.skus.find(sk => sk.stockLeft == null || sk.stockLeft > 0)

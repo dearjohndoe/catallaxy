@@ -111,6 +111,23 @@ export interface PreflightResult {
   accepts: any[]
   /** URL the 402 was issued for — echoed as the x402 `resource`. */
   resourceUrl: string
+  /** Rails the agent lists but can't take payments on right now. */
+  unavailableRails: string[]
+}
+
+/** Rail ids from a sidecar `unavailable_rails` field (402/503: objects; /info: strings). */
+function parseUnavailableRails(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .map((u: any) => (typeof u === 'string' ? u : u?.rail))
+    .filter((r: unknown): r is string => typeof r === 'string')
+}
+
+/** A preflight refused because none of the agent's rails can take a payment now. */
+export class RailsUnavailableError extends Error {
+  constructor(public rails: string[]) {
+    super(`Payments via ${rails.join(', ') || 'this agent'} are temporarily unavailable — the agent can't see the network right now. Try again in a minute.`)
+  }
 }
 
 export async function invokePreflight(
@@ -153,10 +170,29 @@ export async function invokePreflight(
         paymentOptions: options,
         accepts: Array.isArray(err.response.data.accepts) ? err.response.data.accepts : [],
         resourceUrl: `${endpoint}/invoke`,
+        unavailableRails: parseUnavailableRails(err.response.data.unavailable_rails),
       }
+    }
+    if (err.response?.status === 503 && Array.isArray(err.response.data?.unavailable_rails)) {
+      throw new RailsUnavailableError(parseUnavailableRails(err.response.data.unavailable_rails))
     }
     throw err?.response?.data?.error ? new Error(err.response.data.error) : err
   }
+}
+
+const SETTLE_THROTTLE_REASONS: Record<string, string> = {
+  settle_in_progress: 'Another payment from this USDC account is being settled.',
+  source_cooldown: 'A recent payment from this USDC account failed on-chain.',
+  too_many_failed_settlements: 'Too many failed payments from your network.',
+}
+
+/** USDC x402 settle refused before broadcast (429): nothing was charged. */
+export function settleThrottledMessage(status: number | undefined, data: any): string | null {
+  if (status !== 429) return null
+  const reason = SETTLE_THROTTLE_REASONS[data?.error]
+  if (!reason) return null
+  const wait = Number(data?.retry_after_seconds) || 60
+  return `${reason} Nothing was charged — try again in ${wait} s.`
 }
 
 export async function invokeAgent(
@@ -188,7 +224,14 @@ export async function invokeAgent(
   const headers = paymentSignature
     ? { ...(resolved.headers ?? {}), 'PAYMENT-SIGNATURE': paymentSignature }
     : resolved.headers
-  const { data } = await axios.post(resolved.url, form, { timeout: 90000, headers })
+  let data
+  try {
+    ({ data } = await axios.post(resolved.url, form, { timeout: 90000, headers }))
+  } catch (err: any) {
+    const throttled = settleThrottledMessage(err?.response?.status, err?.response?.data)
+    if (throttled) throw new Error(throttled)
+    throw err
+  }
   return {
     jobId: data.job_id, status: data.status,
     result: data.result, error: data.error,
@@ -274,6 +317,8 @@ export async function fetchQuote(
 export interface AgentInfo {
   skus: Sku[]
   paymentRails: string[]
+  /** Listed rails that are down right now (stale payment monitor). */
+  unavailableRails: string[]
   name?: string
   description?: string
   capabilities?: string[]
@@ -307,6 +352,7 @@ export async function fetchAgentInfo(endpoint: string): Promise<AgentInfo> {
   return {
     skus,
     paymentRails,
+    unavailableRails: parseUnavailableRails(data?.unavailable_rails),
     name: typeof data?.name === 'string' ? data.name : undefined,
     description: typeof data?.description === 'string' ? data.description : undefined,
     capabilities: Array.isArray(data?.capabilities) ? data.capabilities.map(String) : undefined,
