@@ -31,3 +31,18 @@ export function friendlyAddr(raw: string): string {
 export function normalizeDesc(s: string): string {
   return s.replace(/\\n/g, '\n')
 }
+
+export function lamportsToSol(n: number) {
+  const t = n / 1e9
+  return t < 0.0001 ? t.toExponential(2) : t.toFixed(6).replace(/\.?0+$/, '')
+}
+
+/** Human price for a rail's base units ("0.01 TON", "1.5 USDC"). */
+export function formatRailPrice(rail: string, amount: number): string {
+  switch (rail) {
+    case 'USDT': return `${microToUsdt(amount)} USDT`
+    case 'USDC': return `${microToUsdt(amount)} USDC`
+    case 'SOL': return `${lamportsToSol(amount)} SOL`
+    default: return `${nanoToTon(amount)} TON`
+  }
+}

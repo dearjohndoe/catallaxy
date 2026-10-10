@@ -37,6 +37,9 @@ function parseHeartbeatTx(tx: any): Agent | null {
       capabilities,
       price: Number(payload.price ?? payload.price_hint) || 0,
       priceUsdt: payload.price_usdt != null ? Number(payload.price_usdt) : undefined,
+      priceSol: payload.price_sol != null ? Number(payload.price_sol) : undefined,
+      priceUsdc: payload.price_usdc != null ? Number(payload.price_usdc) : undefined,
+      rails: Array.isArray(payload.rails) ? payload.rails.map((r: unknown) => String(r).toUpperCase()) : undefined,
       endpoint: payload.endpoint,
       argsSchema: payload.args_schema ?? {},
       lastHeartbeat: tx.now,
@@ -45,6 +48,7 @@ function parseHeartbeatTx(tx: any): Agent | null {
       previewUrl: sanitizeImageUrl(payload.preview_url) ?? undefined,
       avatarUrl: sanitizeImageUrl(payload.avatar_url) ?? undefined,
       images: sanitizeImageList(payload.images),
+      chains: ['ton'],
     }
   } catch {
     return null

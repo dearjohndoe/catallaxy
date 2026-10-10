@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { TonConnectUIProvider } from '@tonconnect/ui-react'
 import { App } from './App'
 import './index.css'
+import { initSolanaWallets } from './lib/solanaWallet'
 
 const manifestUrl = `https://dearjohndoe.github.io/catallaxy/tonconnect-manifest.json`
 
@@ -14,6 +15,8 @@ async function bootstrap() {
       serviceWorker: { url: `${import.meta.env.BASE_URL}mockServiceWorker.js` },
     })
   }
+
+  initSolanaWallets()
 
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>

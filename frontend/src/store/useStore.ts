@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { fetchAgentPage, type Cursor } from '../lib/toncenter'
+import { fetchSolanaAgents } from '../lib/solanaRegistry'
+import { mergeAgents } from '../lib/agents'
 import { MOCK_AGENTS } from '../lib/mockAgents'
 
 const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true'
@@ -23,13 +25,17 @@ interface Store {
   patchAgent: (sidecarId: string, patch: Partial<Agent>) => void
 }
 
-function mergeAgents(existing: Agent[], incoming: Agent[]): Agent[] {
-  const map = new Map(existing.map(a => [a.address, a]))
-  for (const a of incoming) {
-    const cur = map.get(a.address)
-    if (!cur || a.lastHeartbeat > cur.lastHeartbeat) map.set(a.address, a)
+/** First page of both registries. One registry failing still shows the other. */
+async function fetchFirstPage(): Promise<{ agents: Agent[]; hasMore: boolean; nextCursor: Cursor | null }> {
+  const [ton, sol] = await Promise.allSettled([fetchAgentPage(), fetchSolanaAgents()])
+  if (ton.status === 'rejected' && sol.status === 'rejected') throw ton.reason
+  if (sol.status === 'rejected') console.warn('[solana registry] fetch failed', sol.reason)
+  const tonPage = ton.status === 'fulfilled' ? ton.value : { agents: [], hasMore: false, nextCursor: null }
+  return {
+    agents: mergeAgents(tonPage.agents, sol.status === 'fulfilled' ? sol.value : []),
+    hasMore: tonPage.hasMore,
+    nextCursor: tonPage.nextCursor,
   }
-  return [...map.values()].sort((a, b) => b.lastHeartbeat - a.lastHeartbeat)
 }
 
 export const useStore = create<Store>()(
@@ -55,7 +61,7 @@ export const useStore = create<Store>()(
           if (USE_MOCK) {
             agents = MOCK_AGENTS; hasMore = false; nextCursor = null
           } else {
-            ;({ agents, hasMore, nextCursor } = await fetchAgentPage())
+            ;({ agents, hasMore, nextCursor } = await fetchFirstPage())
           }
           set({
             allAgents: agents,

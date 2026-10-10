@@ -82,7 +82,8 @@ export interface PaymentOption {
   memo: string
   /** Full claim value. Distinct from `memo`. */
   nonce?: string
-  token?: { symbol: string; master: string; decimals: number }
+  token?: { symbol: string; master?: string; mint?: string; decimals: number }
+  network?: string
 }
 
 function buildMultipart(
@@ -106,6 +107,10 @@ function buildMultipart(
 export interface PreflightResult {
   paymentRequest: PaymentRequest
   paymentOptions: PaymentOption[]
+  /** x402 `accepts[]` (USDC on Solana), when the agent offers it. */
+  accepts: any[]
+  /** URL the 402 was issued for — echoed as the x402 `resource`. */
+  resourceUrl: string
 }
 
 export async function invokePreflight(
@@ -125,8 +130,8 @@ export async function invokePreflight(
     await axios.post(url, form, { timeout: 90000, headers })
     throw new Error('Expected 402 Payment Required, but got success')
   } catch (err: any) {
-    if (err.response?.status === 402 && err.response.data?.payment_request) {
-      const pr = err.response.data.payment_request
+    if (err.response?.status === 402 && (err.response.data?.payment_request || err.response.data?.payment_options)) {
+      const pr = err.response.data.payment_request ?? {}
       const options: PaymentOption[] = err.response.data.payment_options ?? [{
         rail: pr.rail ?? 'TON',
         address: pr.address,
@@ -139,13 +144,15 @@ export async function invokePreflight(
       const claimNonce = String(primary.nonce ?? pr.nonce ?? memo)
       return {
         paymentRequest: {
-          address: pr.address,
-          amount: pr.amount,
+          address: pr.address ?? primary.address,
+          amount: pr.amount ?? primary.amount,
           nonce: claimNonce,
           memo,
-          rail: pr.rail,
+          rail: pr.rail ?? primary.rail,
         },
         paymentOptions: options,
+        accepts: Array.isArray(err.response.data.accepts) ? err.response.data.accepts : [],
+        resourceUrl: `${endpoint}/invoke`,
       }
     }
     throw err?.response?.data?.error ? new Error(err.response.data.error) : err
@@ -162,6 +169,7 @@ export async function invokeAgent(
   fileFields?: Record<string, File>,
   rail?: string,
   sku?: string,
+  paymentSignature?: string,
 ): Promise<InvokeResult> {
   const form = buildMultipart(
     {
@@ -174,8 +182,13 @@ export async function invokeAgent(
     body,
     fileFields,
   )
-  const { url, headers } = resolveUrl(endpoint, '/invoke')
-  const { data } = await axios.post(url, form, { timeout: 90000, headers })
+  const resolved = resolveUrl(endpoint, '/invoke')
+  // x402: the payment rides in `PAYMENT-SIGNATURE`; `proof` carries the same
+  // value so a proxy that drops unknown headers cannot lose it.
+  const headers = paymentSignature
+    ? { ...(resolved.headers ?? {}), 'PAYMENT-SIGNATURE': paymentSignature }
+    : resolved.headers
+  const { data } = await axios.post(resolved.url, form, { timeout: 90000, headers })
   return {
     jobId: data.job_id, status: data.status,
     result: data.result, error: data.error,
@@ -283,6 +296,8 @@ export async function fetchAgentInfo(endpoint: string): Promise<AgentInfo> {
         free: s.free === true ? true : undefined,
         priceTon: typeof s.price_ton === 'number' ? s.price_ton : undefined,
         priceUsdt: typeof s.price_usd === 'number' ? s.price_usd : undefined,
+        priceSol: typeof s.price_sol === 'number' ? s.price_sol : undefined,
+        priceUsdc: typeof s.price_usdc === 'number' ? s.price_usdc : undefined,
         stockLeft: typeof s.stock_left === 'number' ? s.stock_left : undefined,
         total: typeof s.total === 'number' ? s.total : undefined,
         sold: typeof s.sold === 'number' ? s.sold : undefined,

@@ -1114,3 +1114,30 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
+
+/* ── Solana wallet (Wallet Standard) ── */
+.sol-connect { position: relative; }
+.sol-connect-btn { cursor: pointer; }
+.sol-wallet-icon { width: 14px; height: 14px; border-radius: 3px; }
+.sol-connect-menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 20;
+  min-width: 190px; max-width: calc(100vw - 32px);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 4px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.sol-connect-item {
+  display: flex; align-items: center; gap: 8px;
+  background: none; border: none; text-align: left; cursor: pointer;
+  color: var(--text); font-size: 13px;
+  padding: 7px 8px; border-radius: var(--radius-xs);
+}
+.sol-connect-item:hover { background: var(--surface-2); }
+.sol-connect-empty, .sol-connect-error { font-size: 12px; color: var(--text-muted); padding: 7px 8px; }
+.sol-connect-error { color: var(--error, #ef4444); }
+.rail-selector { flex-wrap: wrap; }
+.chain-tag { text-transform: lowercase; }
+@media (max-width: 480px) {
+  .btn-agent-label { display: none; }
+  .header-actions { gap: 6px; }
+}

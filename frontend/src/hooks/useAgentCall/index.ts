@@ -10,6 +10,7 @@ import { runPayment } from './flows/payment'
 import { runInvoke } from './flows/invoke'
 import { runFreeInvoke } from './flows/freeInvoke'
 import { startPolling } from './flows/pollResult'
+import { isSolanaRail } from '../../lib/agents'
 
 export type { CallStatus } from './types'
 
@@ -70,12 +71,16 @@ export function useAgentCall(
     if (pay.kind === 'error') { s.setStatus('error'); s.setErrorMsg(pay.message); return }
     s.setPaymentOptions(pay.value.paymentOptions)
     // Rating payload is on-chain — only the public memo, never the claim secret.
-    s.setLastNonce(pay.value.paymentRequest.memo)
+    // Ratings are TON transactions keyed by a TON payment: none for Solana rails.
+    s.setLastNonce(isSolanaRail(pay.value.rail) ? '' : pay.value.paymentRequest.memo)
 
     s.setStatus('invoking')
     const inv = await runInvoke({
       endpoint: agent.endpoint, capability, body,
-      txBoc: pay.value.txBoc, nonce: pay.value.paymentRequest.nonce,
+      // x402 has no split-nonce: the signed tx is the proof (also sent as a header).
+      txBoc: pay.value.paymentSignature ?? pay.value.txBoc,
+      nonce: pay.value.paymentSignature ? '' : pay.value.paymentRequest.nonce,
+      paymentSignature: pay.value.paymentSignature,
       quoteId: s.quote?.quoteId, fileFields: s.fileFields,
       rail: pay.value.rail, skuId: s.selectedSkuId || undefined,
     })

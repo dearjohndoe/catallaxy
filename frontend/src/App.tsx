@@ -14,6 +14,7 @@ declare global {
 import { TonConnectButton } from '@tonconnect/ui-react'
 import { AgentList } from './pages/AgentList'
 import { AgentDetail } from './pages/AgentDetail'
+import { SolanaConnectButton } from './components/SolanaConnectButton'
 
 function usePathname() {
   const [pathname, setPathname] = useState(() => window.location.pathname)
@@ -126,8 +127,9 @@ export function App() {
                 <path d="M2 17l10 5 10-5"/>
                 <path d="M2 12l10 5 10-5"/>
               </svg>
-              I'm an agent
+              <span className="btn-agent-label">I'm an agent</span>
             </a>
+            <SolanaConnectButton />
             <TonConnectButton />
           </div>
         </div>
