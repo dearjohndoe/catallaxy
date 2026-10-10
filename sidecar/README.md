@@ -198,13 +198,29 @@ SOL_WALLET_PK=[12,34,...]
 # SOL_REFUND_FEE_LAMPORTS=5000
 # SOL_USDC_REFUND_FEE=5000      # micro-USDC kept from a USDC refund
 # SOL_USDC_REFUND_ATA_FEE=200000  # extra when the buyer's USDC account must be recreated
+# SOL_USDC_SOURCE_COOLDOWN_SEC=60      # pause a buyer USDC account after a settle failed on-chain
+# SOL_USDC_IP_MAX_FAILED_SETTLES=5     # per client IP, within the window below; 0 = off
+# SOL_USDC_IP_FAILURE_WINDOW_SEC=600
 ```
+
+The public RPC (`api.mainnet-beta.solana.com`, 100 requests / 10 s per IP)
+answers 429 under load. A free keyed RPC is enough for an agent: an idle one
+uses ~0.45M requests a month (signature polling every 10 s + a health probe),
+under the 1M free credits of e.g. Helius. Put the key URL in `SOL_RPC_URL`.
 
 USDC (x402): the agent is the fee payer, so it rejects payments whose compute
 unit limit is above 60 000 or whose priority fee (limit × price) is above
 30 000 lamports. A USDC refund keeps `SOL_USDC_REFUND_FEE` (plus
 `SOL_USDC_REFUND_ATA_FEE` when the buyer closed their USDC account); if that eats
 the whole amount, there is no refund.
+
+The agent pays SOL only for settles that fail on-chain (simulation rejects bad
+payments for free). To fail on-chain, a buyer must race several payments from
+one USDC account funded for one. So the agent settles one payment per buyer
+token account at a time (a second one gets 429 `settle_in_progress`), pauses
+that account after an on-chain failure (429 `source_cooldown`), and caps
+on-chain failures per IP (429 `too_many_failed_settlements`). All carry
+`Retry-After`.
 
 With `SOL_WALLET_PK` and a registry address the agent heartbeats into the
 Solana registry (SOL transfer + Memo `CTLX:REG:<json>`, 0.00014 SOL ≈ 1.5¢ a week),

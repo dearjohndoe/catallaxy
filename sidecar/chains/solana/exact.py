@@ -28,7 +28,11 @@ from chains.solana.constants import (
     MAX_CU_PRICE_MICROLAMPORTS,
     MAX_PRIORITY_FEE_LAMPORTS,
     MEMO_PROGRAM,
+    SETTLE_BUSY_RETRY_SECONDS,
     SETTLE_CACHE_TTL_SECONDS,
+    SETTLE_IP_FAILURE_WINDOW_SECONDS,
+    SETTLE_IP_MAX_FAILURES,
+    SETTLE_SOURCE_COOLDOWN_SECONDS,
     TOKEN_2022_PROGRAM,
     TOKEN_PROGRAM,
     TRANSFER_CHECKED_DISC,
@@ -55,6 +59,7 @@ class InspectedExactPayment:
     sender: str
     amount: int
     mint: str
+    source: str
     dest_ata: str
     client_signature: str
     identity: str
@@ -242,6 +247,7 @@ def inspect_exact(
         sender=str(authority),
         amount=amount,
         mint=str(mint),
+        source=str(source),
         dest_ata=str(dest),
         client_signature=str(client_sig),
         identity=identity,
@@ -249,13 +255,78 @@ def inspect_exact(
     )
 
 
-class ExactSettler:
-    """Co-sign as fee payer and publish. In-process duplicate-settlement cache."""
+class SettleThrottled(PaymentVerificationError):
+    """Settle refused before broadcast; the client may retry after ``retry_after``."""
 
-    def __init__(self, *, keypair: Keypair, rpc: SolanaRpc) -> None:
+    def __init__(self, reason: str, retry_after: int) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.retry_after = max(1, retry_after)
+
+
+class SettlementFailedOnChain(PaymentVerificationError):
+    """Broadcast went out, then the tx failed or never confirmed: we may have paid the fee."""
+
+
+class ExactSettler:
+    """Co-sign as fee payer and publish.
+
+    In-process guards: a duplicate-settlement cache, one settle in flight per
+    source token account, a cooldown on that account after an on-chain failure,
+    and a cap on on-chain failures per client (IP). See constants.py.
+    """
+
+    def __init__(
+        self,
+        *,
+        keypair: Keypair,
+        rpc: SolanaRpc,
+        source_cooldown_seconds: float = SETTLE_SOURCE_COOLDOWN_SECONDS,
+        client_max_failures: int = SETTLE_IP_MAX_FAILURES,
+        client_failure_window_seconds: float = SETTLE_IP_FAILURE_WINDOW_SECONDS,
+    ) -> None:
         self._kp = keypair
         self._rpc = rpc
         self._inflight: dict[str, float] = {}
+        self._source_busy: set[str] = set()
+        self._source_cooldown: dict[str, float] = {}
+        self._client_failures: dict[str, list[float]] = {}
+        self._source_cooldown_seconds = source_cooldown_seconds
+        self._client_max_failures = client_max_failures
+        self._client_failure_window = client_failure_window_seconds
+
+    def _check_throttles(self, source: str, client_key: str | None, now: float) -> None:
+        if source in self._source_busy:
+            raise SettleThrottled("settle_in_progress", SETTLE_BUSY_RETRY_SECONDS)
+        until = self._source_cooldown.get(source, 0.0)
+        if until > now:
+            raise SettleThrottled("source_cooldown", int(until - now) + 1)
+        self._source_cooldown.pop(source, None)
+        if client_key and self._client_max_failures > 0:
+            cutoff = now - self._client_failure_window
+            history = [t for t in self._client_failures.get(client_key, ()) if t > cutoff]
+            if history:
+                self._client_failures[client_key] = history
+            else:
+                self._client_failures.pop(client_key, None)
+            if len(history) >= self._client_max_failures:
+                raise SettleThrottled(
+                    "too_many_failed_settlements", int(history[0] - cutoff) + 1,
+                )
+
+    def _record_onchain_failure(self, source: str, client_key: str | None, now: float) -> None:
+        if self._source_cooldown_seconds > 0:
+            self._source_cooldown[source] = now + self._source_cooldown_seconds
+        if client_key:
+            self._client_failures.setdefault(client_key, []).append(now)
+        # Bound memory against rotating sources/IPs.
+        for key, until in list(self._source_cooldown.items()):
+            if until <= now:
+                self._source_cooldown.pop(key, None)
+        cutoff = now - self._client_failure_window
+        for key, history in list(self._client_failures.items()):
+            if not history or history[-1] <= cutoff:
+                self._client_failures.pop(key, None)
 
     def _cache_ok(self, identity: str) -> bool:
         now = time.time()
@@ -267,14 +338,28 @@ class ExactSettler:
         self._inflight[identity] = now
         return True
 
-    async def settle(self, inspected: InspectedExactPayment) -> VerifiedPayment:
+    async def settle(
+        self, inspected: InspectedExactPayment, *, client_key: str | None = None,
+    ) -> VerifiedPayment:
+        source = inspected.source
+        self._check_throttles(source, client_key, time.time())
         if not self._cache_ok(inspected.identity):
             raise PaymentVerificationError("duplicate_settlement")
+        self._source_busy.add(source)
         try:
             return await self._settle(inspected)
+        except SettlementFailedOnChain:
+            self._inflight.pop(inspected.identity, None)
+            self._record_onchain_failure(source, client_key, time.time())
+            logger.warning(
+                "USDC settle failed after broadcast: source=%s client=%s", source, client_key,
+            )
+            raise
         except Exception:
             self._inflight.pop(inspected.identity, None)
             raise
+        finally:
+            self._source_busy.discard(source)
 
     async def _settle(self, inspected: InspectedExactPayment) -> VerifiedPayment:
         tx = inspected.tx
@@ -311,11 +396,11 @@ class ExactSettler:
                 status = None
             if status is not None:
                 if status.get("err"):
-                    raise PaymentVerificationError(f"settlement failed on-chain: {status['err']}")
+                    raise SettlementFailedOnChain(f"settlement failed on-chain: {status['err']}")
                 conf = status.get("confirmationStatus") or ""
                 # Not `confirmations is not None`: that is set already at
                 # "processed", which one RPC node alone has seen.
                 if conf in ("confirmed", "finalized"):
                     return
             await asyncio.sleep(0.4)
-        raise PaymentVerificationError("settlement not confirmed in time")
+        raise SettlementFailedOnChain("settlement not confirmed in time")

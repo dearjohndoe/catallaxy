@@ -142,6 +142,11 @@ class Settings:
     # has to recreate the buyer's USDC account (rent paid by the seller).
     sol_usdc_refund_fee: int = 5_000
     sol_usdc_refund_ata_fee: int = 200_000
+    # USDC settle throttles (the seller pays SOL for settles that fail
+    # on-chain): cooldown per buyer token account, cap per client IP.
+    sol_usdc_source_cooldown_seconds: int = 60
+    sol_usdc_ip_max_failed_settles: int = 5
+    sol_usdc_ip_failure_window_seconds: int = 600
     sol_commitment: str = "confirmed"
     # Solana discovery registry wallet. None → no Solana heartbeat (mainnet has
     # no default yet).
@@ -491,6 +496,12 @@ def load_settings(env_file: str | None = None) -> Settings:
     sol_usdc_refund_ata_fee = int(_chain_env("SOL", "USDC_REFUND_ATA_FEE") or "200000")
     if sol_usdc_refund_fee < 0 or sol_usdc_refund_ata_fee < 0:
         raise RuntimeError("SOL_USDC_REFUND_FEE / SOL_USDC_REFUND_ATA_FEE must be >= 0")
+    sol_usdc_source_cooldown_seconds = int(_chain_env("SOL", "USDC_SOURCE_COOLDOWN_SEC") or "60")
+    sol_usdc_ip_max_failed_settles = int(_chain_env("SOL", "USDC_IP_MAX_FAILED_SETTLES") or "5")
+    sol_usdc_ip_failure_window_seconds = int(_chain_env("SOL", "USDC_IP_FAILURE_WINDOW_SEC") or "600")
+    if min(sol_usdc_source_cooldown_seconds, sol_usdc_ip_max_failed_settles,
+           sol_usdc_ip_failure_window_seconds) < 0:
+        raise RuntimeError("SOL_USDC_SOURCE_COOLDOWN_SEC / SOL_USDC_IP_* must be >= 0")
     if sol_wallet_pk:
         from chains.solana.wallet import parse_solana_keypair
         sol_wallet = str(parse_solana_keypair(sol_wallet_pk).pubkey())
@@ -585,6 +596,9 @@ def load_settings(env_file: str | None = None) -> Settings:
         sol_refund_fee_lamports=sol_refund_fee_lamports,
         sol_usdc_refund_fee=sol_usdc_refund_fee,
         sol_usdc_refund_ata_fee=sol_usdc_refund_ata_fee,
+        sol_usdc_source_cooldown_seconds=sol_usdc_source_cooldown_seconds,
+        sol_usdc_ip_max_failed_settles=sol_usdc_ip_max_failed_settles,
+        sol_usdc_ip_failure_window_seconds=sol_usdc_ip_failure_window_seconds,
         sol_commitment=sol_commitment,
         sol_registry_address=sol_registry_address,
     )

@@ -23,6 +23,9 @@ from chains.solana.constants import (
     ASSOCIATED_TOKEN_PROGRAM,
     MEMO_PROGRAM,
     RENT_EXEMPT_MIN_LAMPORTS,
+    SETTLE_IP_FAILURE_WINDOW_SECONDS,
+    SETTLE_IP_MAX_FAILURES,
+    SETTLE_SOURCE_COOLDOWN_SECONDS,
     SIGNATURE_FEE_LAMPORTS,
     TOKEN_ACCOUNT_RENT_LAMPORTS,
     TOKEN_ACCOUNT_SIZE,
@@ -59,6 +62,9 @@ class UsdcRail:
         get_sidecar_id: Callable[[], str] = lambda: "",
         refund_fee: int = USDC_REFUND_FEE,
         refund_ata_fee: int = USDC_REFUND_ATA_FEE,
+        source_cooldown_seconds: float = SETTLE_SOURCE_COOLDOWN_SECONDS,
+        client_max_failures: int = SETTLE_IP_MAX_FAILURES,
+        client_failure_window_seconds: float = SETTLE_IP_FAILURE_WINDOW_SECONDS,
     ) -> None:
         self._kp = keypair
         self._refund_fee = refund_fee
@@ -70,7 +76,12 @@ class UsdcRail:
             or (USDC_MINT_DEVNET if self.cluster == "devnet" else USDC_MINT_MAINNET)
         )
         self.pay_to = keypair.pubkey()
-        self._settler = settler or ExactSettler(keypair=keypair, rpc=rpc)
+        self._settler = settler or ExactSettler(
+            keypair=keypair, rpc=rpc,
+            source_cooldown_seconds=source_cooldown_seconds,
+            client_max_failures=client_max_failures,
+            client_failure_window_seconds=client_failure_window_seconds,
+        )
         self._get_sidecar_id = get_sidecar_id
         self._last_ok_at: float = 0.0
         self._stop = asyncio.Event()
@@ -121,8 +132,10 @@ class UsdcRail:
         inspected = self.inspect(proof, min_amount)
         return await self._settler.settle(inspected)
 
-    async def settle(self, inspected: InspectedExactPayment) -> VerifiedPayment:
-        return await self._settler.settle(inspected)
+    async def settle(
+        self, inspected: InspectedExactPayment, *, client_key: str | None = None,
+    ) -> VerifiedPayment:
+        return await self._settler.settle(inspected, client_key=client_key)
 
     async def refund(
         self, to: str, amount: int, *, original_tx_hash: str, reason: str,

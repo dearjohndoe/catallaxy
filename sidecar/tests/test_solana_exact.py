@@ -20,7 +20,8 @@ from solders.transaction import VersionedTransaction
 
 from chains.base import ChainRail
 from chains.solana.constants import CAIP2_DEVNET, TOKEN_PROGRAM, USDC_MINT_DEVNET
-from chains.solana.exact import ExactSettler, inspect_exact, signing_payload
+from chains.solana.exact import ExactSettler, SettleThrottled, inspect_exact, signing_payload
+from chains.solana.rpc import SolanaRpcError
 from chains.solana.rail_usdc import UsdcRail
 from payments.types import PaymentVerificationError
 
@@ -263,3 +264,115 @@ async def test_settle_waits_past_processed(monkeypatch):
     paid = await ExactSettler(keypair=seller, rpc=rpc).settle(inspected)
     assert paid.amount == 10_000
     assert rpc.signature_status.await_count == 3
+
+
+def _inspected(seller: Keypair, buyer: Keypair, *, cu_price: int = 1):
+    """A distinct payload (distinct client signature) per ``cu_price``."""
+    mint = Pubkey.from_string(USDC_MINT_DEVNET)
+    tx = _partial_exact(
+        fee=seller, buyer=buyer, pay_to=seller.pubkey(), mint=mint, amount=10_000, cu_price=cu_price,
+    )
+    return inspect_exact(
+        _proof(tx), min_amount=10_000, pay_to=seller.pubkey(),
+        mint=mint, fee_payer=seller.pubkey(), cluster="devnet",
+    )
+
+
+def _ok_rpc() -> AsyncMock:
+    rpc = AsyncMock()
+    rpc.send_transaction = AsyncMock(return_value="sig")
+    rpc.signature_status = AsyncMock(return_value={"confirmationStatus": "confirmed", "err": None})
+    return rpc
+
+
+async def test_settle_one_in_flight_per_source_account():
+    """The race: two payloads from one USDC account funded for one payment. The
+    second must not reach the chain while the first is settling."""
+    import asyncio as _asyncio
+
+    seller, buyer = Keypair(), Keypair()
+    first, second = _inspected(seller, buyer, cu_price=1), _inspected(seller, buyer, cu_price=2)
+    assert first.source == second.source and first.identity != second.identity
+    gate = _asyncio.Event()
+
+    async def slow_send(_tx):
+        await gate.wait()
+        return "sig1"
+
+    rpc = _ok_rpc()
+    rpc.send_transaction = AsyncMock(side_effect=slow_send)
+    settler = ExactSettler(keypair=seller, rpc=rpc)
+    task = _asyncio.create_task(settler.settle(first))
+    await _asyncio.sleep(0)
+    with pytest.raises(SettleThrottled) as exc:
+        await settler.settle(second)
+    assert exc.value.reason == "settle_in_progress" and exc.value.retry_after > 0
+    # Another buyer is not blocked.
+    other_buyer = _inspected(seller, Keypair())
+    gate.set()
+    assert (await task).tx_hash == "sig1"
+    assert (await settler.settle(other_buyer)).tx_hash == "sig1"
+    assert rpc.send_transaction.await_count == 2
+    # Released after the first one finished.
+    assert (await settler.settle(second)).tx_hash == "sig1"
+
+
+async def test_settle_onchain_failure_cools_down_the_source(monkeypatch):
+    import chains.solana.exact as exact_mod
+
+    now = [1_000.0]
+    monkeypatch.setattr(exact_mod.time, "time", lambda: now[0])
+    seller, buyer = Keypair(), Keypair()
+    rpc = _ok_rpc()
+    rpc.signature_status = AsyncMock(return_value={"confirmationStatus": "confirmed", "err": {"InstructionError": [2, {"Custom": 1}]}})
+    settler = ExactSettler(keypair=seller, rpc=rpc, source_cooldown_seconds=60)
+    with pytest.raises(PaymentVerificationError, match="failed on-chain"):
+        await settler.settle(_inspected(seller, buyer, cu_price=1))
+
+    rpc.signature_status = AsyncMock(return_value={"confirmationStatus": "confirmed", "err": None})
+    with pytest.raises(SettleThrottled) as exc:
+        await settler.settle(_inspected(seller, buyer, cu_price=2))
+    assert exc.value.reason == "source_cooldown" and 0 < exc.value.retry_after <= 61
+    assert rpc.send_transaction.await_count == 1
+    assert (await settler.settle(_inspected(seller, Keypair()))).tx_hash == "sig"
+
+    now[0] += 61
+    assert (await settler.settle(_inspected(seller, buyer, cu_price=2))).tx_hash == "sig"
+
+
+async def test_settle_rejected_by_simulation_costs_nothing_so_no_cooldown():
+    seller, buyer = Keypair(), Keypair()
+    rpc = _ok_rpc()
+    rpc.send_transaction = AsyncMock(side_effect=SolanaRpcError("simulation failed: insufficient funds"))
+    settler = ExactSettler(keypair=seller, rpc=rpc)
+    with pytest.raises(PaymentVerificationError, match="settle send failed"):
+        await settler.settle(_inspected(seller, buyer, cu_price=1), client_key="1.2.3.4")
+    rpc.send_transaction = AsyncMock(return_value="sig")
+    assert (await settler.settle(_inspected(seller, buyer, cu_price=2), client_key="1.2.3.4")).tx_hash == "sig"
+
+
+async def test_settle_caps_onchain_failures_per_client(monkeypatch):
+    """A fresh source account per attempt dodges the cooldown; the per-IP cap
+    still stops it. Other IPs are unaffected."""
+    import chains.solana.exact as exact_mod
+
+    now = [5_000.0]
+    monkeypatch.setattr(exact_mod.time, "time", lambda: now[0])
+    seller = Keypair()
+    rpc = _ok_rpc()
+    rpc.signature_status = AsyncMock(return_value={"confirmationStatus": "confirmed", "err": {"x": 1}})
+    settler = ExactSettler(
+        keypair=seller, rpc=rpc, client_max_failures=2, client_failure_window_seconds=600,
+    )
+    for _ in range(2):
+        with pytest.raises(PaymentVerificationError, match="failed on-chain"):
+            await settler.settle(_inspected(seller, Keypair()), client_key="6.6.6.6")
+    with pytest.raises(SettleThrottled) as exc:
+        await settler.settle(_inspected(seller, Keypair()), client_key="6.6.6.6")
+    assert exc.value.reason == "too_many_failed_settlements"
+    assert rpc.send_transaction.await_count == 2
+
+    rpc.signature_status = AsyncMock(return_value={"confirmationStatus": "confirmed", "err": None})
+    assert (await settler.settle(_inspected(seller, Keypair()), client_key="7.7.7.7")).tx_hash == "sig"
+    now[0] += 601
+    assert (await settler.settle(_inspected(seller, Keypair()), client_key="6.6.6.6")).tx_hash == "sig"

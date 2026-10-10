@@ -28,7 +28,7 @@ from solders.system_program import ID as SYSTEM_PROGRAM, TransferParams, transfe
 from solders.token.associated import get_associated_token_address
 from solders.transaction import VersionedTransaction
 
-from chains.solana.constants import ASSOCIATED_TOKEN_PROGRAM, MEMO_PROGRAM, TOKEN_PROGRAM
+from chains.solana.constants import ASSOCIATED_TOKEN_PROGRAM, MEMO_PROGRAM, TOKEN_PROGRAM, USDC_REFUND_FEE
 from chains.solana.rail_usdc import UsdcRail
 from chains.solana.rpc import SolanaRpc
 
@@ -207,13 +207,13 @@ async def main(seller_path: str, buyer_path: str, url: str) -> None:
         print("   accepts[0]:", {k: accepted[k] for k in ("scheme", "network", "amount", "payTo", "asset") if k in accepted},
               accepted.get("extra"))
 
-        async def x402_header() -> tuple[str, str]:
+        async def x402_header(cu_price: int = 1) -> tuple[str, str]:
             fee_payer = Pubkey.from_string(accepted["extra"]["feePayer"])
             pay_to = Pubkey.from_string(accepted["payTo"])
             amount = int(accepted.get("amount") or accepted.get("maxAmountRequired"))
             src = get_associated_token_address(bpk, USDC, TOKEN_PROGRAM)
             dst = get_associated_token_address(pay_to, USDC, TOKEN_PROGRAM)
-            ixs = [set_compute_unit_limit(50_000), set_compute_unit_price(1),
+            ixs = [set_compute_unit_limit(50_000), set_compute_unit_price(cu_price),
                    Instruction(TOKEN_PROGRAM, bytes([12]) + struct.pack("<Q", amount) + bytes([6]), [
                        AccountMeta(src, False, True), AccountMeta(USDC, False, False),
                        AccountMeta(dst, False, True), AccountMeta(bpk, True, False)])]
@@ -245,8 +245,24 @@ async def main(seller_path: str, buyer_path: str, url: str) -> None:
         st, body = await claim(http, url, {"capability": "echo", "body": {"text": "oos"}},
                                headers={"X-PAYMENT": hdr})
         check("F USDC oos reports refund (v1 X-PAYMENT header)", st == 200 and "refund" in json.dumps(body), (st, body))
-        got = await wait_balance(rpc, lambda: token_balance(rpc, bpk), lambda v: v >= before, 60)
-        check("F USDC refund landed (full amount)", got == before, (before, got))
+        # The refund keeps SOL_USDC_REFUND_FEE (default; devnet.env does not override it).
+        want = before - USDC_REFUND_FEE
+        got = await wait_balance(rpc, lambda: token_balance(rpc, bpk), lambda v: v >= want, 60)
+        check("F USDC refund landed (amount - refund fee)", got == want, (want, got))
+
+        # ── G. Two payloads from one USDC account at once → one settles, one 429 ──
+        (h1, _), (h2, _) = await x402_header(1), await x402_header(2)
+        before = await token_balance(rpc, bpk)
+        r1, r2 = await asyncio.gather(*(
+            claim(http, url, {"capability": "echo", "body": {"text": "hello"}},
+                  headers={"PAYMENT-SIGNATURE": h}) for h in (h1, h2)
+        ))
+        codes = sorted([r1[0], r2[0]])
+        throttled = r1 if r1[0] == 429 else r2
+        check("G parallel same-source: one 200, one 429 settle_in_progress",
+              codes == [200, 429] and throttled[1].get("error") == "settle_in_progress", (r1, r2))
+        got = await wait_balance(rpc, lambda: token_balance(rpc, bpk), lambda v: v < before, 30)
+        check("G only one payment charged", before - got == USDC_PRICE, before - got)
 
     # cleanup: buyer USDC + SOL back to seller
     left_usdc = await token_balance(rpc, bpk)

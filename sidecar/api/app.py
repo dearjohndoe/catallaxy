@@ -153,6 +153,9 @@ class SidecarApp:
                     get_sidecar_id=lambda: self.sidecar_id,
                     refund_fee=settings.sol_usdc_refund_fee,
                     refund_ata_fee=settings.sol_usdc_refund_ata_fee,
+                    source_cooldown_seconds=settings.sol_usdc_source_cooldown_seconds,
+                    client_max_failures=settings.sol_usdc_ip_max_failed_settles,
+                    client_failure_window_seconds=settings.sol_usdc_ip_failure_window_seconds,
                 )
             if "SOL" in sol_rails:
                 self.rails["SOL"] = SolRail(

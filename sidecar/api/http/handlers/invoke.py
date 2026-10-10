@@ -33,10 +33,12 @@ from api.http.handlers._invoke_helpers import (
     claim_stock,
     consume_monitor_nonce,
     enqueue_refund_after_payment,
+    rails_unavailable_response,
     unlock_quote,
     verify_payment,
     wait_and_render,
 )
+from chains.solana.exact import SettleThrottled
 from chains.solana.x402 import extract_header_proof
 
 if TYPE_CHECKING:
@@ -348,20 +350,14 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
             return quote_err
 
         if not parsed.tx_hash:
-            if not _monitor_healthy_for_rail(sidecar, parsed.rail):
+            # Explicit rail: answer for that rail alone. Otherwise the 402
+            # drops whichever rails are down and lists them as unavailable.
+            if parsed.rail_explicit and not _monitor_healthy_for_rail(sidecar, parsed.rail):
                 logger.warning(
                     "invoke: monitor unhealthy for rail=%s, refusing preflight",
                     parsed.rail,
                 )
-                return web.json_response(
-                    {
-                        "error": "service temporarily unavailable",
-                        "detail": f"Wallet monitor for rail={parsed.rail} has no fresh on-chain view; retry shortly.",
-                        "retry_after_seconds": 60,
-                    },
-                    status=503,
-                    headers={"Retry-After": "60"},
-                )
+                return rails_unavailable_response([parsed.rail])
             return await build_402_response(parsed, sku, sidecar, eff_ton, eff_usd, min_ton, min_usdt)
 
         missing = validate_body(parsed.payload, sidecar.args_schema, has_tx=True, uploaded_files=uploaded_files)
@@ -446,7 +442,15 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
 
         if x402_claim:
             try:
-                verified = await usdc_rail.settle(inspected)
+                verified = await usdc_rail.settle(
+                    inspected, client_key=client_ip(request, sidecar.settings),
+                )
+            except SettleThrottled as exc:
+                unlock_quote(parsed.quote_id, sidecar)
+                return web.json_response(
+                    {"error": exc.reason, "retry_after_seconds": exc.retry_after},
+                    status=429, headers={"Retry-After": str(exc.retry_after)},
+                )
             except PaymentVerificationError as exc:
                 unlock_quote(parsed.quote_id, sidecar)
                 return web.json_response({"error": str(exc)}, status=402)

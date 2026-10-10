@@ -8,6 +8,7 @@ from aiohttp import web
 from settings import SkuKind
 
 from api.domain.quoting import fetch_dynamic_prices, has_dynamic_skus
+from api.http.handlers._invoke_helpers import unavailable_rail_ids
 
 if TYPE_CHECKING:
     from api.app import SidecarApp
@@ -31,6 +32,11 @@ async def handle_info(_: web.Request, sidecar: "SidecarApp") -> web.Response:
     }
     if settings.has_quote:
         info["has_quote"] = True
+    # Rails listed but down right now (stale payment monitor): clients grey
+    # them out instead of hiding them; preflight leaves them out of the 402.
+    unavailable = unavailable_rail_ids(sidecar)
+    if unavailable:
+        info["unavailable_rails"] = unavailable
 
     # Always emit skus[] so clients can drive per-SKU UI. Legacy single-SKU
     # agents still see price/price_usdt top-level (populated from that SKU).

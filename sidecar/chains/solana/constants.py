@@ -42,6 +42,16 @@ MAX_PRIORITY_FEE_LAMPORTS = 30_000
 USDC_REFUND_FEE = 5_000
 USDC_REFUND_ATA_FEE = 200_000
 SETTLE_CACHE_TTL_SECONDS = 120
+# Settle throttles. The seller (fee payer) loses SOL only on a settle that
+# fails on-chain; preflight simulation rejects bad txs for free. The way to make
+# it fail on-chain is a race: several payloads from one USDC account funded for
+# one payment all pass simulation, all but one fail on-chain. So: one settle in
+# flight per source token account, a cooldown on that account after an on-chain
+# failure, and a coarse cap on on-chain failures per client IP. Env-overridable.
+SETTLE_SOURCE_COOLDOWN_SECONDS = 60
+SETTLE_BUSY_RETRY_SECONDS = 5
+SETTLE_IP_MAX_FAILURES = 5
+SETTLE_IP_FAILURE_WINDOW_SECONDS = 600
 DEFAULT_RPC_MAINNET = "https://api.mainnet-beta.solana.com"
 DEFAULT_RPC_DEVNET = "https://api.devnet.solana.com"
 

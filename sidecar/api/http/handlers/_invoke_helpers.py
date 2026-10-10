@@ -127,6 +127,55 @@ async def enqueue_refund_after_payment(
     )
 
 
+RAIL_RETRY_AFTER_SECONDS = 60
+
+
+def monitor_max_age() -> float:
+    try:
+        return float(os.environ.get("PAYMENT_MONITOR_MAX_AGE_SEC", "60"))
+    except ValueError:
+        return 60.0
+
+
+def unavailable_rail_ids(sidecar: "SidecarApp") -> list[str]:
+    """Advertised rails whose monitor is stale right now (for /info)."""
+    max_age = monitor_max_age()
+    return [
+        rail_id for rail_id in sidecar.settings.payment_rails
+        if (rail := sidecar.rails.get(rail_id)) is not None and not _rail_healthy(rail, max_age)
+    ]
+
+
+def _rail_healthy(rail: ChainRail, max_age: float) -> bool:
+    try:
+        return bool(rail.monitor_healthy(max_age))
+    except Exception:
+        # Safer to offer the rail than to hide it over a check bug.
+        logger.exception("monitor_healthy raised for rail=%s", rail.rail_id)
+        return True
+
+
+def unavailable_entries(rail_ids: list[str]) -> list[dict[str, Any]]:
+    return [
+        {"rail": rail_id, "reason": "monitor_degraded", "retry_after_seconds": RAIL_RETRY_AFTER_SECONDS}
+        for rail_id in rail_ids
+    ]
+
+
+def rails_unavailable_response(rail_ids: list[str]) -> web.Response:
+    """503 for a preflight none of whose requested rails can take a payment now."""
+    return web.json_response(
+        {
+            "error": "service temporarily unavailable",
+            "detail": f"payment monitor degraded ({', '.join(rail_ids)})",
+            "retry_after_seconds": RAIL_RETRY_AFTER_SECONDS,
+            "unavailable_rails": unavailable_entries(rail_ids),
+        },
+        status=503,
+        headers={"Retry-After": str(RAIL_RETRY_AFTER_SECONDS)},
+    )
+
+
 async def build_402_response(
     parsed: "ParsedInvoke",
     sku: AgentSku,
@@ -141,13 +190,9 @@ async def build_402_response(
     if view.stock_left is not None and view.stock_left <= 0:
         return web.json_response({"error": "out_of_stock", "sku": sku.sku_id}, status=409)
 
-    # Monitor-health gate (plan D). If a rail we would advertise has no fresh
-    # successful poll, refuse the preflight with 503 — better than taking the
-    # payment when we can't detect it. Callers retry after `Retry-After`.
-    try:
-        max_age = float(os.environ.get("PAYMENT_MONITOR_MAX_AGE_SEC", "60"))
-    except ValueError:
-        max_age = 60.0
+    # Monitor-health gate (plan D): never advertise a rail whose monitor has no
+    # fresh successful poll — we could take the payment and not detect it.
+    max_age = monitor_max_age()
     # Rails this SKU can be paid on, each paired with the amount to charge. The
     # health gate and 402 body below are driven off these rail objects.
     priced: list[tuple[ChainRail, int]] = []
@@ -163,21 +208,19 @@ async def build_402_response(
         if sku.price_sol and "SOL" in sidecar.rails:
             priced.append((sidecar.rails["SOL"], sku.price_sol))
 
-    unhealthy_rails = [r.rail_id for r, _ in priced if not r.monitor_healthy(max_age)]
-    if unhealthy_rails:
+    # A rail with a stale monitor is left out of the 402 but listed in
+    # `unavailable_rails`, so clients show it as down rather than missing —
+    # a Solana RPC outage must not stop TON sales. 503 only if no rail is left.
+    unavailable = [r for r, _ in priced if not _rail_healthy(r, max_age)]
+    if unavailable:
+        priced = [(r, amount) for r, amount in priced if r not in unavailable]
+        unavailable_ids = [r.rail_id for r in unavailable]
         logger.warning(
-            "preflight refused: payment monitor degraded for rails=%s sku=%s",
-            unhealthy_rails, sku.sku_id,
+            "preflight: payment monitor degraded for rails=%s sku=%s (offering %s)",
+            unavailable_ids, sku.sku_id, [r.rail_id for r, _ in priced] or "none",
         )
-        return web.json_response(
-            {
-                "error": "service temporarily unavailable",
-                "detail": f"payment monitor degraded ({', '.join(unhealthy_rails)})",
-                "retry_after_seconds": 60,
-            },
-            status=503,
-            headers={"Retry-After": "60"},
-        )
+        if not priced:
+            return rails_unavailable_response(unavailable_ids)
 
     # This happens when an SKU uses dynamic pricing and the agent omitted it from
     # `mode=prices` — typically because it's out of stock upstream. Emitting a
@@ -234,9 +277,11 @@ async def build_402_response(
         "payment_request": payment_options[0],
         "payment_options": payment_options,
     }
+    if unavailable:
+        resp_body["unavailable_rails"] = unavailable_entries(unavailable_ids)
 
     headers: dict[str, str] = {}
-    if eff_ton:
+    if any(r.rail_id == "TON" for r, _ in priced):
         headers["x-ton-pay-address"] = sidecar.settings.agent_wallet
         headers["x-ton-pay-amount"] = str(min_ton)
         # Public-only half, matching `memo` — NOT the full claim nonce. A

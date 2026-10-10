@@ -880,6 +880,56 @@ async def test_preflight_503_when_sol_monitor_stale(app_factory):
         assert resp.status == 503
 
 
+async def test_preflight_drops_stale_rail_and_lists_it_unavailable(app_factory):
+    rpc = FakeRpc()
+    app = _sol_app(app_factory, rpc)  # SOL never polled → unhealthy, TON healthy
+    async with _serve_app(app) as c:
+        resp = await c.post("/invoke", json={"capability": "translate", "body": {"text": "hi"}})
+        assert resp.status == 402, await resp.text()
+        data = await resp.json()
+        assert [o["rail"] for o in data["payment_options"]] == ["TON"]
+        assert data["unavailable_rails"] == [
+            {"rail": "SOL", "reason": "monitor_degraded", "retry_after_seconds": 60},
+        ]
+        assert resp.headers["x-ton-pay-address"]
+        info = await (await c.get("/info")).json()
+        assert info["payment_rails"] == ["TON", "SOL"]
+        assert info["unavailable_rails"] == ["SOL"]
+        # Once SOL polls, it is offered again and nothing is unavailable.
+        await app.rails["SOL"].monitor.poll()
+        data = await (await c.post("/invoke", json={"capability": "translate", "body": {"text": "hi"}})).json()
+        assert [o["rail"] for o in data["payment_options"]] == ["TON", "SOL"]
+        assert "unavailable_rails" not in data
+        assert "unavailable_rails" not in await (await c.get("/info")).json()
+
+
+async def test_preflight_503_lists_rails_when_none_is_healthy(app_factory):
+    rpc = FakeRpc()
+    app = _sol_app(app_factory, rpc)
+    app.rails["TON"].monitor_healthy = lambda *_a, **_k: False
+    async with _serve_app(app) as c:
+        resp = await c.post("/invoke", json={"capability": "translate", "body": {"text": "hi"}})
+        assert resp.status == 503
+        assert resp.headers["Retry-After"] == "60"
+        data = await resp.json()
+        assert [u["rail"] for u in data["unavailable_rails"]] == ["TON", "SOL"]
+
+
+async def test_preflight_ton_down_still_sells_on_sol(app_factory):
+    rpc = FakeRpc()
+    app = _sol_app(app_factory, rpc)
+    app.rails["TON"].monitor_healthy = lambda *_a, **_k: False
+    await app.rails["SOL"].monitor.poll()
+    async with _serve_app(app) as c:
+        resp = await c.post("/invoke", json={"capability": "translate", "body": {"text": "hi"}})
+        assert resp.status == 402, await resp.text()
+        data = await resp.json()
+        assert [o["rail"] for o in data["payment_options"]] == ["SOL"]
+        assert data["payment_request"]["rail"] == "SOL"
+        assert [u["rail"] for u in data["unavailable_rails"]] == ["TON"]
+        assert "x-ton-pay-address" not in resp.headers
+
+
 async def test_refund_worker_recovers_and_refunds_sol(app_factory):
     """Verifier crashed mid-claim: worker recovers sender/amount from the SOL
     monitor and refunds on Solana, never touching the TON liteserver path."""

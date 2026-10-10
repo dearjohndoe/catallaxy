@@ -412,3 +412,38 @@ async def test_multipart_invoke_reads_x402_header_and_default_rail(app_factory):
         bad = await c.post("/invoke", data=form(), headers={"PAYMENT-SIGNATURE": "e30="})
         assert bad.status == 402
         assert "x402" in (await bad.json())["error"]  # inspected as x402, not "nonce is required"
+
+
+async def test_usdc_settle_throttle_answers_429_with_retry_after(app_factory):
+    """A throttled settle never reached the chain: 429 + Retry-After, the client
+    IP goes to the settler, and the payload is not marked processed."""
+    from types import SimpleNamespace
+
+    from chains.solana.exact import SettleThrottled
+
+    sku = AgentSku(
+        sku_id=DEFAULT_SKU_ID, title=DEFAULT_SKU_ID, price_ton=None, price_usd=None,
+        initial_stock=None, price_sol=None, price_usdc=10_000,
+    )
+    app = _sol_only_app(app_factory, skus=(sku,), payment_rails=("USDC",), agent_price_usdc=10_000)
+    app.rails["USDC"].monitor_healthy = lambda max_age_seconds=60.0: True
+    app.rails["USDC"].inspect = lambda proof, min_amount: SimpleNamespace(
+        identity="solana:clientsig", client_signature="clientsig",
+    )
+    seen: list = []
+
+    async def throttled(inspected, *, client_key=None):
+        seen.append(client_key)
+        raise SettleThrottled("settle_in_progress", 5)
+
+    app.rails["USDC"].settle = throttled
+    async with _serve_app(app) as c:
+        resp = await c.post(
+            "/invoke", json={"capability": "translate", "rail": "USDC", "body": {"text": "hi"}},
+            headers={"PAYMENT-SIGNATURE": "e30="},
+        )
+        assert resp.status == 429, await resp.text()
+        assert resp.headers["Retry-After"] == "5"
+        assert await resp.json() == {"error": "settle_in_progress", "retry_after_seconds": 5}
+        assert not await app.tx_store.is_processed("solana:clientsig")
+    assert seen and seen[0]
