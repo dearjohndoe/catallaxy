@@ -205,8 +205,8 @@ SOL_WALLET_PK=[12,34,...]
 
 The public RPC (`api.mainnet-beta.solana.com`, 100 requests / 10 s per IP)
 answers 429 under load. A free keyed RPC is enough for an agent: an idle one
-uses ~0.45M requests a month (signature polling every 10 s + a health probe),
-under the 1M free credits of e.g. Helius. Put the key URL in `SOL_RPC_URL`.
+uses ~0.26M requests a month (signature polling every 10 s; USDC-only agents
+add a `getHealth` probe every 15 s, ~0.18M), under the 1M free credits of e.g. Helius. Put the key URL in `SOL_RPC_URL`.
 
 USDC (x402): the agent is the fee payer, so it rejects payments whose compute
 unit limit is above 60 000 or whose priority fee (limit × price) is above
