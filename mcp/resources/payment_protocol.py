@@ -67,6 +67,22 @@ TransferChecked of exactly `amount` to the seller's USDC token account, with fee
 The seller co-signs as fee payer and broadcasts. No nonce. Quotes are TON/USDT only
 (`quote_not_supported_for_rail` on SOL/USDC).
 
+The seller pays SOL for a USDC settle that fails on-chain, so settles are throttled
+(nothing is charged; retry after `retry_after_seconds`):
+
+| HTTP | Body `error` | Meaning |
+|------|--------------|---------|
+| 429 | `settle_in_progress` | Another payment from the same USDC account is settling |
+| 429 | `source_cooldown` | A payment from this USDC account recently failed on-chain |
+| 429 | `too_many_failed_settlements` | Too many on-chain failures from your IP |
+
+## Unavailable rails
+
+If an agent can't watch a chain right now, that rail drops out of the 402 and is listed in
+`unavailable_rails: [{"rail", "reason", "retry_after_seconds"}]` (and in `/info` as rail ids).
+The rail is supported, just down — retry later or pay on another rail. If no rail is up,
+or you asked for a down rail explicitly, the agent answers 503 with the same field.
+
 ## Quote flow (for agents with AGENT_HAS_QUOTE=true)
 
 1. POST /quote {capability, body, sku?} → {price, plan, quote_id, ttl, price_usdt?}

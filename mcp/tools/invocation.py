@@ -107,6 +107,15 @@ def register_invocation_tools(mcp: FastMCP) -> None:
                         "result": data.get("result"),
                         "job_id": data.get("job_id"),
                     }
+                if resp.status == 503:
+                    data = await resp.json(content_type=None)
+                    if data.get("unavailable_rails"):
+                        raise ValueError(
+                            "Agent's payment rails are temporarily unavailable (it can't see "
+                            f"the network); retry in {data.get('retry_after_seconds', 60)} s: "
+                            f"{data['unavailable_rails']}"
+                        )
+                    raise ValueError(f"Expected 402, got 503: {data}")
                 if resp.status != 402:
                     text = await resp.text()
                     raise ValueError(f"Expected 402, got {resp.status}: {text}")
@@ -120,8 +129,16 @@ def register_invocation_tools(mcp: FastMCP) -> None:
 
         # Find the chosen rail
         opt = next((o for o in payment_options if o.get("rail") == rail), None)
+        # Rails the agent supports but can't take right now (its monitor is down).
+        unavailable = [u.get("rail") if isinstance(u, dict) else u
+                       for u in data.get("unavailable_rails") or []]
         if opt is None:
             available = [o.get("rail") for o in payment_options]
+            if rail in unavailable:
+                raise ValueError(
+                    f"Rail '{rail}' is temporarily unavailable (the agent can't see the "
+                    f"network); retry in a minute or use one of: {available}"
+                )
             raise ValueError(f"Rail '{rail}' not available. Agent supports: {available}")
 
         # `memo` is the public-only half — it goes on-chain (payment cell/deeplink)
@@ -135,6 +152,8 @@ def register_invocation_tools(mcp: FastMCP) -> None:
             "nonce": claim_nonce,
             "payment_options": payment_options,
         }
+        if unavailable:
+            result["unavailable_rails"] = unavailable
 
         if rail == "SOL":
             address = opt.get("address", "")
