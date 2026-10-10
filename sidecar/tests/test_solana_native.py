@@ -626,6 +626,40 @@ async def test_find_existing_refund_matches_memo_for_original():
     assert await rail.find_existing_refund("solana:pub:cccccccc") is None
 
 
+async def test_find_existing_refund_pages_back_to_since():
+    from chains.solana import refunds
+
+    rpc = FakeRpc()
+    rail = _rail(rpc)
+    seller = str(rail.pay_to)
+    now = int(time.time())
+    old = rpc.pay(source=seller, dest="Y", lamports=1, block_time=now - 100,
+                  memo=refund_memo("solana:pub:bbbbbbbb", "r", SID))
+    for _ in range(refunds.DEDUP_PAGE_SIZE + 5):  # bury it past one page
+        rpc.pay(source="buyer", dest=seller, lamports=1, memo=None, block_time=now)
+    rpc.signature_calls.clear()
+    assert await rail.find_existing_refund("solana:pub:bbbbbbbb") is None  # newest page only
+    assert await rail.find_existing_refund("solana:pub:bbbbbbbb", since=now - 200) == old
+    # Stops once a page reaches rows older than since (minus clock slack).
+    rpc.signature_calls.clear()
+    since = now + refunds.DEDUP_CLOCK_SLACK_SECONDS + 1
+    assert await rail.find_existing_refund("solana:pub:cccccccc", since=since) is None
+    assert len(rpc.signature_calls) == 1
+
+
+async def test_find_existing_refund_inconclusive_past_page_cap(monkeypatch):
+    from chains.solana import refunds
+
+    monkeypatch.setattr(refunds, "DEDUP_PAGE_SIZE", 2)
+    monkeypatch.setattr(refunds, "DEDUP_MAX_PAGES", 2)
+    rpc = FakeRpc()
+    rail = _rail(rpc)
+    for _ in range(6):
+        rpc.pay(source="buyer", dest=str(rail.pay_to), lamports=1, memo=None)
+    with pytest.raises(refunds.RefundDedupInconclusive):
+        await rail.find_existing_refund("solana:pub:dddddddd", since=time.time() - 3600)
+
+
 async def test_recover_payment_from_monitor():
     rpc = FakeRpc()
     rail = _rail(rpc)

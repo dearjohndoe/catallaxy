@@ -326,6 +326,14 @@ def test_solana_only_app_has_no_ton_components(app_factory):
     assert set(app.rails) == {"SOL"}
 
 
+def test_usdc_health_comes_from_sol_poller_when_both_rails_run(app_factory):
+    both = _sol_only_app(app_factory, payment_rails=("SOL", "USDC"))
+    usdc, sol = both.rails["USDC"], both.rails["SOL"]
+    assert usdc.health_from == sol.monitor_healthy
+    usdc_only = _sol_only_app(app_factory, payment_rails=("USDC",))
+    assert usdc_only.rails["USDC"].health_from is None
+
+
 async def test_build_heartbeats_per_chain_key(app_factory):
     from api.lifecycle import build_heartbeats
 

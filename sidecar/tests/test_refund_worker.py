@@ -412,3 +412,60 @@ async def test_stale_recovery_reverts_to_pending_when_no_onchain_refund(worker_a
     await _recover_stale_refunding(worker_app, older_than_seconds=-1)
 
     assert (await worker_app.refund_queue.get("S2")).status == "pending"
+
+
+# ── Solana rails: dedup through the rail's own RPC ─────────────────────
+
+
+def _sol_rail(find_existing):
+    return SimpleNamespace(find_existing_refund=find_existing)
+
+
+async def _retried_entry(rq: RefundQueue, tx_hash: str, rail: str = "SOL"):
+    await rq.enqueue(tx_hash=tx_hash, nonce="n", rail=rail, sender="buyer", amount=1000)
+    await rq.claim(tx_hash)
+    await rq.mark_failed_transient(tx_hash, "blip", 0)
+    return await rq.get(tx_hash)
+
+
+async def test_solana_dedup_scans_back_to_entry_creation(worker_app, patch_onchain):
+    find = AsyncMock(return_value="PRIOR")
+    worker_app.rails = {"SOL": _sol_rail(find)}
+    entry = await _retried_entry(worker_app.refund_queue, "SX1")
+
+    await _process_entry(worker_app, entry)
+
+    find.assert_awaited_once_with("SX1", since=entry.created_at)
+    patch_onchain.find_existing.assert_not_awaited()  # no TON liteserver probe
+    patch_onchain.refund_user.assert_not_awaited()
+    assert (await worker_app.refund_queue.get("SX1")).refund_tx == "PRIOR"
+
+
+async def test_solana_dedup_failure_defers_instead_of_resending(worker_app, patch_onchain):
+    worker_app.rails = {"USDC": _sol_rail(AsyncMock(side_effect=RuntimeError("429")))}
+    entry = await _retried_entry(worker_app.refund_queue, "SX2", rail="USDC")
+
+    await _process_entry(worker_app, entry)
+
+    patch_onchain.refund_user.assert_not_awaited()
+    rec = await worker_app.refund_queue.get("SX2")
+    assert rec.status == "pending" and "dedup_probe_failed" in rec.last_error
+    assert rec.next_attempt_at > entry.next_attempt_at
+
+
+async def test_stale_recovery_solana_uses_rail_hook_without_ton_client(worker_app, monkeypatch):
+    def _no_ton(app):
+        raise AssertionError("Solana-only recovery must not open a TON client")
+
+    monkeypatch.setattr(refund_worker, "_acquire_lite_client", _no_ton)
+    find = AsyncMock(return_value="SOL_REFUND")
+    worker_app.rails = {"SOL": _sol_rail(find)}
+    await worker_app.refund_queue.enqueue(tx_hash="SX3", nonce="n", rail="SOL",
+                                          sender="buyer", amount=1000)
+    await worker_app.refund_queue.claim("SX3")
+
+    await _recover_stale_refunding(worker_app, older_than_seconds=-1)
+
+    rec = await worker_app.refund_queue.get("SX3")
+    assert rec.status == "refunded" and rec.refund_tx == "SOL_REFUND"
+    assert find.await_args.kwargs["since"] == rec.created_at

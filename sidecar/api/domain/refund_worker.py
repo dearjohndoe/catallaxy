@@ -87,16 +87,11 @@ async def _recover_stale_refunding(app: "SidecarApp", older_than_seconds: int) -
         return
     logger.warning("refund_worker: recovering %d stale 'refunding' entries", len(stale))
 
-    async with _acquire_lite_client(app) as client:
+    needs_ton = any(_rail_hook(app, e.rail, "find_existing_refund") is None for e in stale)
+    async with (_acquire_lite_client(app) if needs_ton else contextlib.nullcontext()) as client:
         for entry in stale:
             try:
-                found = await find_existing_refund_tx(
-                    client=client,
-                    agent_wallet=app.settings.agent_wallet,
-                    rail=entry.rail,
-                    original_tx_hash=entry.tx_hash,
-                    sidecar_id=app.sidecar_id,
-                )
+                found = await _find_existing_refund(app, entry, client)
             except Exception:
                 logger.exception(
                     "refund_worker: probe failed during stale recovery tx=%s", entry.tx_hash,
@@ -214,21 +209,23 @@ async def _process_entry(app: "SidecarApp", entry: PendingRefund) -> None:
     # of sending again. Skipped on the very first attempt — nothing to dedup
     # against, and probing wastes one RPC per refund.
     if entry.attempts >= 1 and entry.sender and entry.amount is not None:
+        own_rpc = _rail_hook(app, entry.rail, "find_existing_refund") is not None
         try:
-            find_existing = _rail_hook(app, entry.rail, "find_existing_refund")
-            if find_existing is not None:
-                existing = await find_existing(entry.tx_hash)
+            if own_rpc:
+                existing = await _find_existing_refund(app, entry, None)
             else:
                 async with _acquire_lite_client(app) as client:
-                    existing = await find_existing_refund_tx(
-                        client=client,
-                        agent_wallet=app.settings.agent_wallet,
-                        rail=entry.rail,
-                        original_tx_hash=entry.tx_hash,
-                        sidecar_id=app.sidecar_id,
-                    )
-        except Exception:
+                    existing = await _find_existing_refund(app, entry, client)
+        except Exception as exc:
             logger.exception("refund_worker: pre-send dedup probe failed tx=%s", entry.tx_hash)
+            if own_rpc:
+                # Solana RPCs 429 routinely: a failed probe is not "no refund
+                # sent". Defer instead of risking a second refund.
+                await app.refund_queue.defer_pending(
+                    entry.tx_hash, f"dedup_probe_failed: {exc}",
+                    _backoff_for_attempt(entry.attempts + 1),
+                )
+                return
             existing = None
         if existing:
             await app.refund_queue.mark_refunded(entry.tx_hash, existing)
@@ -330,6 +327,21 @@ async def _process_entry(app: "SidecarApp", entry: PendingRefund) -> None:
         await app.refund_queue.mark_failed_permanent(
             entry.tx_hash, "refund_user returned None (likely amount-after-fee <= 0)",
         )
+
+
+async def _find_existing_refund(app: "SidecarApp", entry: PendingRefund, client) -> str | None:
+    """On-chain hash of a refund already sent for ``entry``. Solana rails scan
+    their own RPC back to the entry's creation; TON rails scan via ``client``."""
+    find_existing = _rail_hook(app, entry.rail, "find_existing_refund")
+    if find_existing is not None:
+        return await find_existing(entry.tx_hash, since=entry.created_at)
+    return await find_existing_refund_tx(
+        client=client,
+        agent_wallet=app.settings.agent_wallet,
+        rail=entry.rail,
+        original_tx_hash=entry.tx_hash,
+        sidecar_id=app.sidecar_id,
+    )
 
 
 def _rail_hook(app: "SidecarApp", rail: str, name: str) -> Any | None:

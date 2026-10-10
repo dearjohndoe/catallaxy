@@ -167,6 +167,10 @@ class SidecarApp:
                     refund_fee_lamports=settings.sol_refund_fee_lamports,
                     commitment=settings.sol_commitment,
                 )
+            if "USDC" in self.rails and "SOL" in self.rails:
+                # Same RPC: a successful SOL poll proves it, so skip USDC's own
+                # getHealth probe (~175k RPC credits/month per agent).
+                self.rails["USDC"].health_from = self.rails["SOL"].monitor_healthy
 
     async def refund_user(
         self, recipient: str, payment_amount: int, original_tx_hash: str, reason: str, rail: str = "TON",

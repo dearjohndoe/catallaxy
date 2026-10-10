@@ -222,10 +222,13 @@ class SolRail:
             return False, f"SOL balance {balance} < required {required}"
         return True, ""
 
-    async def find_existing_refund(self, original_tx_hash: str) -> str | None:
+    async def find_existing_refund(
+        self, original_tx_hash: str, *, since: float | None = None,
+    ) -> str | None:
         """Signature of a refund we already sent for ``original_tx_hash``."""
         return await find_refund_signature(
-            self._rpc, str(self.pay_to), original_tx_hash, commitment=self._commitment,
+            self._rpc, str(self.pay_to), original_tx_hash,
+            commitment=self._commitment, since=since,
         )
 
     async def _send_sol(self, to: str, lamports: int, memo: str) -> str:

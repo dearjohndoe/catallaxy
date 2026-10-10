@@ -48,7 +48,8 @@ class UsdcRail:
     rail_id = "USDC"
 
     # No chain watcher here (we broadcast the buyer's tx ourselves), so health
-    # is the RPC we settle through: probed with ``getHealth`` on this cadence.
+    # is the RPC we settle through: probed with ``getHealth`` on this cadence —
+    # unless ``health_from`` borrows it from a SOL rail polling the same RPC.
     HEALTH_PROBE_INTERVAL = 15.0
 
     def __init__(
@@ -65,6 +66,7 @@ class UsdcRail:
         source_cooldown_seconds: float = SETTLE_SOURCE_COOLDOWN_SECONDS,
         client_max_failures: int = SETTLE_IP_MAX_FAILURES,
         client_failure_window_seconds: float = SETTLE_IP_FAILURE_WINDOW_SECONDS,
+        health_from: Callable[[float], bool] | None = None,
     ) -> None:
         self._kp = keypair
         self._refund_fee = refund_fee
@@ -83,6 +85,7 @@ class UsdcRail:
             client_failure_window_seconds=client_failure_window_seconds,
         )
         self._get_sidecar_id = get_sidecar_id
+        self.health_from = health_from
         self._last_ok_at: float = 0.0
         self._stop = asyncio.Event()
         self._probe_task: asyncio.Task[None] | None = None
@@ -90,6 +93,8 @@ class UsdcRail:
     # ── lifecycle ────────────────────────────────────────────────────────
 
     async def start(self) -> None:
+        if self.health_from is not None:
+            return
         await self.probe()
         self._stop = asyncio.Event()
         self._probe_task = asyncio.create_task(self._probe_loop())
@@ -187,7 +192,10 @@ class UsdcRail:
 
     def monitor_healthy(self, max_age_seconds: float = 60.0) -> bool:
         """Fresh successful ``getHealth`` within ``max_age_seconds``. Unstarted
-        rail is never healthy, same as the TON verifiers."""
+        rail is never healthy, same as the TON verifiers. With ``health_from``
+        it is that source's verdict (a SOL poller on the same RPC)."""
+        if self.health_from is not None:
+            return self.health_from(max_age_seconds)
         return self._last_ok_at > 0 and time.time() - self._last_ok_at <= max_age_seconds
 
     async def consume(self, nonce: str) -> None:
@@ -223,8 +231,12 @@ class UsdcRail:
             return False, f"SOL balance {lamports} < required {need} for USDC refund fees"
         return True, ""
 
-    async def find_existing_refund(self, original_tx_hash: str) -> str | None:
-        return await find_refund_signature(self._rpc, str(self.pay_to), original_tx_hash)
+    async def find_existing_refund(
+        self, original_tx_hash: str, *, since: float | None = None,
+    ) -> str | None:
+        return await find_refund_signature(
+            self._rpc, str(self.pay_to), original_tx_hash, since=since,
+        )
 
     async def _send_usdc(
         self, owner_b58: str, amount: int, memo: str | None = None, *, dest_exists: bool | None = None,

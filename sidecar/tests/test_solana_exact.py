@@ -214,6 +214,21 @@ async def test_usdc_rail_health_follows_rpc_probe():
     assert rail._probe_task is None
 
 
+async def test_usdc_rail_borrows_health_without_probing():
+    rpc = AsyncMock()
+    seen = []
+    rail = UsdcRail(
+        keypair=Keypair(), rpc=rpc, cluster="devnet", mint=USDC_MINT_DEVNET,
+        health_from=lambda age: seen.append(age) or True,
+    )
+    await rail.start()
+    rpc.get_health.assert_not_called()
+    assert rail._probe_task is None
+    assert rail.monitor_healthy(30.0) is True
+    assert seen == [30.0]
+    await rail.close()
+
+
 def test_fee_caps_bound_what_the_seller_pays():
     """We pay the fee: CU price ≤ spec cap, CU limit ≤ 60k, priority ≤ 30k lamports.
     A real Solflare payment (limit 50k, price 100k µlamports = 5k lamports) passes."""
