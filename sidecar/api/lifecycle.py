@@ -38,6 +38,8 @@ def build_heartbeats(app: "SidecarApp") -> list[HeartbeatManager]:
         avatar_url=app.settings.agent_avatar_url,
         images=app.settings.agent_images,
         owner_wallet=app.settings.owner_wallet,
+        owner_wallet_sol=app.settings.owner_wallet_sol,
+        payment_addresses=app.settings.payment_addresses(),
         rails=app.settings.payment_rails,
         price_usdc=app.settings.agent_price_usdc,
         price_sol=app.settings.agent_price_sol,

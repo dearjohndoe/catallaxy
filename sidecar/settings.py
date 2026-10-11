@@ -130,6 +130,8 @@ class Settings:
     jetton_wallet_code_hex: str | None = None
     sol_wallet_pk: str | None = None
     sol_wallet: str | None = None
+    # Solana half of OWNER_WALLET; owner_wallet keeps the TON half.
+    owner_wallet_sol: str | None = None
     sol_rpc_url: str | None = None
     sol_cluster: str = "mainnet"
     sol_usdc_mint: str | None = None
@@ -151,6 +153,22 @@ class Settings:
     # Solana discovery registry wallet. None → no Solana heartbeat (mainnet has
     # no default yet).
     sol_registry_address: str | None = None
+
+    def owner_wallets(self) -> dict[str, str]:
+        out = {}
+        if self.owner_wallet:
+            out["ton"] = self.owner_wallet
+        if self.owner_wallet_sol:
+            out["sol"] = self.owner_wallet_sol
+        return out
+
+    def payment_addresses(self) -> dict[str, str]:
+        out = {}
+        if self.agent_wallet:
+            out["ton"] = self.agent_wallet
+        if self.sol_wallet:
+            out["sol"] = self.sol_wallet
+        return out
 
     @property
     def capability(self) -> str:
@@ -184,6 +202,39 @@ def _chain_env_bool(chain: str, suffix: str, *legacy: str, default: bool = False
     if raw is None:
         return default
     return raw.lower() in {"1", "true", "yes", "on"}
+
+
+OWNER_WALLET_SEPARATOR = ","
+
+
+def parse_owner_wallet(raw: str | None) -> tuple[str | None, str | None]:
+    """OWNER_WALLET = ``<ton>[,<sol>]``: ``UQ…``, ``UQ…,``, ``,<sol>`` or
+    ``UQ…,<sol>``. Comma, because raw TON addresses (``0:hex``) contain a
+    colon and standard base64 TON addresses may contain ``/`` and ``+``."""
+    s = (raw or "").strip()
+    if not s:
+        return None, None
+    parts = s.split(OWNER_WALLET_SEPARATOR)
+    if len(parts) > 2:
+        raise RuntimeError("OWNER_WALLET: expected '<ton>', '<ton>,<sol>' or ',<sol>'")
+    ton = parts[0].strip() or None
+    sol = parts[1].strip() if len(parts) == 2 else ""
+    sol = sol or None
+    if ton is None and sol is None:
+        raise RuntimeError("OWNER_WALLET: no address given")
+    if ton is not None:
+        try:
+            from pytoniq_core import Address
+            Address(ton)
+        except Exception as exc:
+            raise RuntimeError(f"OWNER_WALLET: invalid TON address '{ton}'") from exc
+    if sol is not None:
+        try:
+            from solders.pubkey import Pubkey
+            Pubkey.from_string(sol)
+        except Exception as exc:
+            raise RuntimeError(f"OWNER_WALLET: invalid Solana address '{sol}'") from exc
+    return ton, sol
 
 
 def _parse_capabilities(raw: str) -> tuple[str, ...]:
@@ -532,6 +583,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         raise RuntimeError(
             "owner_bot: TG_BOT_TOKEN and TG_USER_ID_LIST must both be set, or both unset"
         )
+    owner_ton, owner_sol = parse_owner_wallet(os.getenv("OWNER_WALLET"))
     return Settings(
         agent_command=os.environ["AGENT_COMMAND"],
         capabilities=_parse_capabilities(os.environ["AGENT_CAPABILITY"]),
@@ -573,7 +625,8 @@ def load_settings(env_file: str | None = None) -> Settings:
         agent_images=tuple(
             u.strip() for u in os.getenv("AGENT_IMAGES", "").split(",") if u.strip()
         ),
-        owner_wallet=os.getenv("OWNER_WALLET") or None,
+        owner_wallet=owner_ton,
+        owner_wallet_sol=owner_sol,
         skus=skus,
         payment_rails=tuple(rails),
         tg_bot_token=tg_bot_token,

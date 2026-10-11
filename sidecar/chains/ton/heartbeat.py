@@ -59,6 +59,9 @@ class HeartbeatConfig:
     avatar_url: str | None = None
     images: tuple[str, ...] = field(default_factory=tuple)
     owner_wallet: str | None = None
+    owner_wallet_sol: str | None = None
+    # chain -> this agent's payment address, so either registry announces both.
+    payment_addresses: dict[str, str] = field(default_factory=dict)
     rails: tuple[str, ...] = field(default_factory=lambda: ("TON",))
     price_usdc: int | None = None
     price_sol: int | None = None
@@ -135,8 +138,13 @@ class HeartbeatManager:
             payload["price_usdc"] = self._config.price_usdc
         if self._config.price_sol is not None:
             payload["price_sol"] = self._config.price_sol
+        # owner_wallet stays the TON owner so CTLX/1 readers keep working.
         if self._config.owner_wallet:
             payload["owner_wallet"] = self._config.owner_wallet
+        if self._config.owner_wallet_sol:
+            payload["owner_wallet_sol"] = self._config.owner_wallet_sol
+        if len(self._config.payment_addresses) > 1:
+            payload["payment_addresses"] = dict(self._config.payment_addresses)
 
         encoded_len = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         if encoded_len > MAX_PAYLOAD_BYTES:

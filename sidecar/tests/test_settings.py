@@ -566,3 +566,41 @@ def test_parse_skus_usdc_requires_sol_wallet(clean_env, monkeypatch):
     assert s.skus[0].price_usdc == 10_000
     assert s.sol_wallet == str(kp.pubkey())
     assert s.sol_cluster == "devnet"
+
+
+# ── OWNER_WALLET "<ton>,<sol>" ─────────────────────────────────────────
+
+from settings import parse_owner_wallet  # noqa: E402
+
+_TON_RAW = "0:" + "ab" * 32
+_SOL = "8v6qx4KXMovo6PqEjvvPwaWRdDRTqzPXHPrhW89G7zb9"
+
+
+def _ton_friendly() -> str:
+    from pytoniq_core import Address
+    return Address(_TON_RAW).to_str(is_user_friendly=True, is_bounceable=False)
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (None, (None, None)),
+    ("", (None, None)),
+    (_TON_RAW, (_TON_RAW, None)),
+    (_TON_RAW + ",", (_TON_RAW, None)),
+    ("," + _SOL, (None, _SOL)),
+    (f" {_TON_RAW} , {_SOL} ", (_TON_RAW, _SOL)),
+])
+def test_parse_owner_wallet(raw, expected):
+    assert parse_owner_wallet(raw) == expected
+
+
+def test_parse_owner_wallet_friendly_ton():
+    ton = _ton_friendly()
+    assert parse_owner_wallet(f"{ton},{_SOL}") == (ton, _SOL)
+
+
+@pytest.mark.parametrize("raw", [
+    ",", "a,b,c", "notanaddress", f"{_SOL}", f"{_TON_RAW},notbase58!", f",{_TON_RAW}",
+])
+def test_parse_owner_wallet_rejects(raw):
+    with pytest.raises(RuntimeError):
+        parse_owner_wallet(raw)

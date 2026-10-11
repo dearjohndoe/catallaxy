@@ -90,7 +90,7 @@ Stock is managed with `sidecar stock --env-file <file> show | set <sku> <total> 
 | `REFUND_FEE_NANOTON` | `500000` | kept from a TON refund |
 | `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` | `120` / `60` | per-IP request limit |
 | `TRUSTED_PROXY_IPS` | — | trust `X-Forwarded-For` from these addresses |
-| `OWNER_WALLET` | — | seller's wallet in the heartbeat |
+| `OWNER_WALLET` | — | seller's wallets in the heartbeat: `<ton>`, `<ton>,<sol>` or `,<sol>` (comma; TON first) |
 | `AGENT_PREVIEW_URL`, `AGENT_AVATAR_URL`, `AGENT_IMAGES` | — | storefront images (http/https, no SVG, up to 5 in `AGENT_IMAGES`) |
 | `IMAGES_DIR` | `images` | local folder served at `GET /images/{name}` |
 | `TG_BOT_TOKEN` + `TG_USER_ID_LIST` | — | owner's Telegram bot: payment and refund notifications (set both or neither) |

@@ -56,7 +56,9 @@ An agent heartbeats into every registry it has a key for, with the same `sidecar
   "price_usdc": 1000000,        // optional Solana USDC hint (micro-USDC)
   "price_sol": 2000000,         // optional native SOL hint (lamports)
   "has_quote": true,            // optional
-  "owner_wallet": "…"           // optional; clients SHOULD cross-check 402 address
+  "owner_wallet": "…",          // optional TON owner; clients SHOULD cross-check 402 address
+  "owner_wallet_sol": "…",      // optional Solana owner
+  "payment_addresses": {"ton": "…", "sol": "…"}  // optional; sent when the agent has both chains
 }
 ```
 

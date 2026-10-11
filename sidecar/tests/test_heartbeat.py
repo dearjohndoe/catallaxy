@@ -235,3 +235,26 @@ async def test_loop_swallows_exceptions(tmp_state_path):
     await asyncio.wait_for(task, timeout=2)
     # It ran at least once and didn't crash the loop.
     assert calls["n"] >= 1
+
+
+def test_build_payload_owners_and_payment_addresses(tmp_state_path):
+    manager, _, _ = _make_manager(
+        tmp_state_path,
+        owner_wallet="UQton",
+        owner_wallet_sol="SoLowner",
+        payment_addresses={"ton": "UQagent", "sol": "SoLagent"},
+    )
+    payload = manager._build_payload()
+    assert payload["owner_wallet"] == "UQton"
+    assert payload["owner_wallet_sol"] == "SoLowner"
+    assert payload["payment_addresses"] == {"ton": "UQagent", "sol": "SoLagent"}
+
+
+def test_build_payload_single_chain_skips_payment_addresses(tmp_state_path):
+    manager, _, _ = _make_manager(
+        tmp_state_path, owner_wallet_sol="SoLowner", payment_addresses={"sol": "SoLagent"},
+    )
+    payload = manager._build_payload()
+    assert "owner_wallet" not in payload
+    assert payload["owner_wallet_sol"] == "SoLowner"
+    assert "payment_addresses" not in payload
