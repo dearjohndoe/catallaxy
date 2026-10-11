@@ -22,7 +22,7 @@ async def parse_multipart_invoke(
     tx_hash = nonce = capability = ""
     proof = ""
     quote_id: str | None = None
-    rail = "TON"
+    rail = ""  # "" = not sent; the caller picks the default
     sku: str | None = None
     body: dict[str, Any] = {}
     uploaded_files: dict[str, Path] = {}
@@ -40,7 +40,7 @@ async def parse_multipart_invoke(
         elif name == "quote_id":
             quote_id = (await part.text()).strip() or None
         elif name == "rail":
-            rail = (await part.text()).strip().upper() or "TON"
+            rail = (await part.text()).strip().upper()
         elif name == "sku":
             sku = (await part.text()).strip() or None
         elif name == "body_json":

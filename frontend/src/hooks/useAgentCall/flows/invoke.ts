@@ -12,6 +12,7 @@ export async function runInvoke(args: {
   fileFields: Record<string, File>
   rail: string
   skuId?: string
+  paymentSignature?: string
 }): Promise<FlowResult<InvokeResult>> {
   try {
     const res = await invokeAgent(
@@ -24,6 +25,7 @@ export async function runInvoke(args: {
       args.fileFields,
       args.rail,
       args.skuId,
+      args.paymentSignature,
     )
     return { kind: 'ok', value: res }
   } catch (err: any) {

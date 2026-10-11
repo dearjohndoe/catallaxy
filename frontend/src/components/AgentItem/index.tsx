@@ -21,7 +21,9 @@ import { SkuSelector } from './SkuSelector'
 import { RailSelector } from './RailSelector'
 import { StockBadge } from './StockBadge'
 import { RefundedBlock } from './RefundedBlock'
-import { friendlyAddr, formatAddr, nanoToTon, microToUsdt } from './utils'
+import { friendlyAddr, formatAddr, nanoToTon, microToUsdt, formatRailPrice } from './utils'
+import { isSolanaRail } from '../../lib/agents'
+import { useSolanaWallet } from '../../lib/solanaWallet'
 
 interface Props {
   agent: Agent
@@ -32,7 +34,8 @@ interface Props {
 
 export function AgentItem({ agent, expanded, onToggle, locked }: Props) {
   const tonConnectUI = useWalletUI()
-  const walletAddress = useWalletAddress()
+  const tonAddress = useWalletAddress()
+  const solAccount = useSolanaWallet(st => st.account)
 
   const call = useAgentCall(agent, expanded, tonConnectUI)
   const { rating: onChainRating, loading: ratingLoading, error: ratingError, refresh: ratingRefresh } = useAgentRating(agent.address, agent.sidecarId, expanded)
@@ -49,6 +52,17 @@ export function AgentItem({ agent, expanded, onToggle, locked }: Props) {
   const fieldsDisabled = call.busy || (agent.hasQuote === true && !isFree && call.status === 'quoted')
   const skuTon = call.selectedSku?.priceTon ?? agent.price
   const skuUsdt = call.selectedSku?.priceUsdt ?? agent.priceUsdt
+  const skuSol = call.selectedSku?.priceSol ?? agent.priceSol
+  const skuUsdc = call.selectedSku?.priceUsdc ?? agent.priceUsdc
+  const payLabel = call.selectedRail === 'SOL' && skuSol ? formatRailPrice('SOL', skuSol)
+    : call.selectedRail === 'USDC' && skuUsdc ? formatRailPrice('USDC', skuUsdc)
+    : call.selectedRail === 'USDT' && skuUsdt ? formatRailPrice('USDT', skuUsdt)
+    : formatRailPrice('TON', skuTon)
+  // Each rail pays from its own chain's wallet.
+  const solanaRail = isSolanaRail(call.selectedRail)
+  const walletAddress = solanaRail ? (solAccount?.address ?? '') : tonAddress
+  // Quotes price TON/USDT only (SOL/USDC quotes are refused by the sidecar).
+  const quoteRails = call.paymentRails.filter(r => !isSolanaRail(r))
   const quoteUsdt = call.quote?.priceUsdt ?? skuUsdt
   const selectedSoldOut = call.selectedSku?.stockLeft != null && call.selectedSku.stockLeft <= 0
   const submitDisabled = call.busy || online === false || selectedSoldOut
@@ -64,6 +78,7 @@ export function AgentItem({ agent, expanded, onToggle, locked }: Props) {
             {online === true && !pinging && <span className="tag" style={{color: 'var(--success)', borderColor: 'var(--success)'}}>online</span>}
             {online === false && !pinging && <span className="agent-offline-badge">offline</span>}
             {pinging && <span className="tag">…</span>}
+            {agent.chains?.includes('solana') && <span className="tag chain-tag">solana</span>}
             {agent.capabilities.map(c => <span key={c} className="tag">{c}</span>)}
           </div>
         </div>
@@ -95,7 +110,7 @@ export function AgentItem({ agent, expanded, onToggle, locked }: Props) {
               <a href={agent.endpoint} target="_blank" rel="noopener noreferrer" className="link">{agent.endpoint}</a>
               <ConnectionBadge mode={call.connMode} />
             </div>
-            <div className="meta-item">
+            {agent.address && <div className="meta-item">
               <span className="meta-label">Wallet</span>
               <a
                 href={`https://${TESTNET ? 'testnet.' : ''}tonviewer.com/${friendlyAddr(agent.address)}`}
@@ -104,7 +119,7 @@ export function AgentItem({ agent, expanded, onToggle, locked }: Props) {
                 {formatAddr(agent.address)}
               </a>
               <CopyButton text={friendlyAddr(agent.address)} />
-            </div>
+            </div>}
             <div className="meta-item">
               <span className="meta-label">Share</span>
               <ShareButton sidecarId={agent.sidecarId} />
@@ -114,7 +129,20 @@ export function AgentItem({ agent, expanded, onToggle, locked }: Props) {
           <div className="agent-divider" />
 
           {!walletAddress ? (
-            <div className="alert alert-info">Connect your wallet to call this agent.</div>
+            <div className="call-form">
+              <RailSelector
+                rails={call.paymentRails}
+                selected={call.selectedRail}
+                onSelect={call.setSelectedRail}
+                disabled={call.busy}
+                unavailable={call.unavailableRails}
+              />
+              <div className="alert alert-info">
+                {solanaRail
+                  ? 'Connect a Solana wallet (Phantom, Solflare, Backpack) to pay in SOL or USDC.'
+                  : 'Connect your wallet to call this agent.'}
+              </div>
+            </div>
           ) : call.status === 'refunded' ? (
             <RefundedBlock
               reason={call.refundReason}
@@ -127,7 +155,7 @@ export function AgentItem({ agent, expanded, onToggle, locked }: Props) {
               <span className="meta-label">Result</span>
               <ResultRenderer result={call.result} downloadUrl={(path) => resolveDownloadUrl(agent.endpoint, path)} />
 
-              {review.reviewStatus === 'sent' ? (
+              {!call.lastNonce ? null : review.reviewStatus === 'sent' ? (
                 <div className="review-done">
                   <span className="review-done-icon">✓</span>
                   <span>Thanks! Your rating is on its way on-chain.</span>
@@ -235,10 +263,11 @@ export function AgentItem({ agent, expanded, onToggle, locked }: Props) {
               ) : inQuoteFlow ? (
                 <div className="quote-actions">
                   <RailSelector
-                    rails={call.paymentRails}
+                    rails={quoteRails}
                     selected={call.selectedRail}
                     onSelect={call.setSelectedRail}
                     disabled={call.busy}
+                    unavailable={call.unavailableRails}
                   />
                   <button type="submit" className="btn btn-primary" disabled={submitDisabled || call.quoteSecondsLeft === 0}>
                     {call.status === 'paying' ? 'Waiting for payment…'
@@ -267,15 +296,14 @@ export function AgentItem({ agent, expanded, onToggle, locked }: Props) {
                     selected={call.selectedRail}
                     onSelect={call.setSelectedRail}
                     disabled={call.busy}
+                    unavailable={call.unavailableRails}
                   />
                   <button type="submit" className="btn btn-primary" disabled={submitDisabled}>
                     {call.status === 'paying' ? 'Waiting for payment…'
                       : call.status === 'invoking' ? 'Calling agent…'
                       : call.status === 'polling' ? 'Waiting for result…'
                       : selectedSoldOut ? 'Sold out'
-                      : call.selectedRail === 'USDT' && skuUsdt
-                        ? `Pay ${microToUsdt(skuUsdt)} USDT & Execute`
-                        : `Pay ${nanoToTon(skuTon)} TON & Execute`}
+                      : `Pay ${payLabel} & Execute`}
                   </button>
                 </>
               )}

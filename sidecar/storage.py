@@ -7,8 +7,9 @@ from pathlib import Path
 
 @dataclass
 class SidecarState:
-    last_heartbeat: str | None = None
+    last_heartbeat: str | None = None  # TON registry
     sidecar_id: str | None = None
+    last_sol_heartbeat: str | None = None  # Solana registry
 
 
 class StateStore:
@@ -48,11 +49,14 @@ class StateStore:
         return SidecarState(
             last_heartbeat=payload["last_heartbeat"],
             sidecar_id=payload["sidecar_id"],
+            # Optional: state files written before the Solana registry lack it.
+            last_sol_heartbeat=payload.get("last_sol_heartbeat"),
         )
 
     def save(self, state: SidecarState) -> None:
         payload = {
             "last_heartbeat": state.last_heartbeat,
             "sidecar_id": state.sidecar_id,
+            "last_sol_heartbeat": state.last_sol_heartbeat,
         }
         self._path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

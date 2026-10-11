@@ -2,58 +2,58 @@
 
 > [Русская версия](README.ru.md)
 
-Telegram Mini App for browsing, paying, and calling agents. Runs entirely in the browser — no backend required.
+The buyer app: an agent list, a call form, payment, and the result. It runs entirely in the browser with no backend, both as a website and as a Telegram Mini App.
 
----
+## Run
+
+```bash
+npm install
+npm run dev          # http://localhost:5173
+npm run dev:mock     # without network or wallet: mock agents and payments
+npm run build        # production build into dist/
+```
 
 ## How it works
 
-1. **Agent list from blockchain** — reads heartbeat TXs (opcode `0xAC52AB67`) from the registry address via TONCenter API, parses agent metadata (name, price, schema, endpoint), caches in localStorage
-2. **Payment via TON Connect** — user connects wallet, sends TX with nonce to agent's address, frontend passes `tx_hash` to agent's `/invoke`
-3. **Dynamic forms** — auto-generated from `args_schema` in the heartbeat payload, supports `string`, `number`, `boolean`, `file` inputs
-4. **Result polling** — sync results shown immediately, async jobs polled via `/result/{job_id}`
-5. **On-chain ratings** — aggregated from payment, refund, and rating TXs directly on-chain
-6. **Quote flow** — agents with `has_quote: true` show a price estimate before payment
+- **Agent list.** The TON registry is read through TONCenter: heartbeats from the last 7 days. The Solana registry takes a single `getSignaturesForAddress` call. Records are merged by `sidecar_id`. Prices, schemas, and rail status come from each agent's `GET /info`.
+- **Wallets.** TON Connect (TON, USDT) and Wallet Standard (Phantom, Solflare, Backpack) for SOL and USDC. Solana code loads lazily, as a separate chunk.
+- **Payment.** On `402` the user picks a rail.
+  - TON/USDT and SOL: the wallet signs and sends the transaction itself.
+  - USDC (x402): the wallet only signs the transaction, and the agent broadcasts it.
+  - An unavailable rail is shown grayed out.
+- **Form and result.** The form is generated from `args_schema`. Long jobs are polled via `/result/{job_id}`.
+- **Ratings** are computed from TON transactions (payments, refunds, ratings).
 
----
+## Config (`.env`)
 
-## Stack
+| Variable | Default | Purpose |
+|---|---|---|
+| `VITE_TESTNET` | `false` | TON testnet (and Solana devnet, unless `VITE_SOL_CLUSTER` is set) |
+| `VITE_REGISTRY_ADDRESS` | official | different TON registry (e2e) |
+| `VITE_SSL_GATEWAY` | — | HTTPS proxy for agent calls ([`ssl-gateway`](../ssl-gateway/)); leave empty for local agents |
+| `VITE_SOL_CLUSTER` | from `VITE_TESTNET` | `devnet` or `mainnet` |
+| `VITE_SOL_RPC_URL` | public RPC | Solana RPC |
+| `VITE_SOL_REGISTRY_ADDRESS` | devnet: built-in; mainnet: none | Solana registry; empty means no Solana discovery |
+| `VITE_MIN_RATING_TXS` | `1` | minimum transactions before a rating is shown |
+| `VITE_USE_MOCK` | `false` | mock mode (what `npm run dev:mock` sets) |
 
-- **React 18** + TypeScript + Vite
-- **@tonconnect/ui-react** — wallet integration
-- **@ton/core** — cell building, address parsing
-- **Zustand** — state with localStorage persistence
-- **Axios** — HTTP client
-
----
-
-## Key modules
+## Code
 
 ```
 src/
-├── config.ts              # Opcodes, network config, registry address
-├── types.ts               # Agent, ArgSchema, Result types
-├── store/useStore.ts      # Agent cache + ratings (Zustand)
+├── config.ts               network, registries, opcodes
+├── pages/                  AgentList, AgentDetail
+├── components/AgentItem/   agent card: SKU, rails, form, result
+├── hooks/useAgentCall/     call flow: 402 → payment → claim → polling
 ├── lib/
-│   ├── toncenter.ts       # TONCenter API — heartbeat parsing
-│   ├── agentClient.ts     # Agent HTTP client (402 flow, file upload)
-│   ├── crypto.ts          # Nonce generation, payment payload building
-│   └── rating.ts          # On-chain rating calculation
-├── pages/
-│   └── AgentList.tsx      # Main page — agent browsing
-└── components/
-    ├── AgentItem.tsx       # Agent card with expandable call form
-    └── AgentCard.tsx       # Agent preview card
+│   ├── agents.ts           merging the TON and Solana registries
+│   ├── toncenter.ts        reading the TON registry
+│   ├── solanaRegistry.ts   reading the Solana registry
+│   ├── agentClient.ts      agent HTTP client (402, files)
+│   ├── crypto.ts           nonce and TON payment cell
+│   ├── solanaWallet.ts     Wallet Standard
+│   ├── solanaPay.ts        SOL transfer + memo, USDC x402
+│   └── rating.ts           rating from transactions
+├── store/useStore.ts       agent cache and ratings (Zustand + localStorage)
+└── mocks/                  mock mode
 ```
-
----
-
-## Config
-
-```env
-VITE_TESTNET=false             # Network selection
-VITE_SSL_GATEWAY=              # Optional proxy for agent calls
-VITE_REGISTRY_ADDRESS=         # Optional mailbox override (e2e testnet). Default is the official Catallaxy registry.
-```
-
-List = heartbeat txs from the last **7 days**. Local e2e cluster uses a different mailbox than production — set `VITE_REGISTRY_ADDRESS` and leave `VITE_SSL_GATEWAY` empty so calls hit `http://127.0.0.1:…`.

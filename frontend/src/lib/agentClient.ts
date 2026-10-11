@@ -82,7 +82,8 @@ export interface PaymentOption {
   memo: string
   /** Full claim value. Distinct from `memo`. */
   nonce?: string
-  token?: { symbol: string; master: string; decimals: number }
+  token?: { symbol: string; master?: string; mint?: string; decimals: number }
+  network?: string
 }
 
 function buildMultipart(
@@ -106,6 +107,27 @@ function buildMultipart(
 export interface PreflightResult {
   paymentRequest: PaymentRequest
   paymentOptions: PaymentOption[]
+  /** x402 `accepts[]` (USDC on Solana), when the agent offers it. */
+  accepts: any[]
+  /** URL the 402 was issued for — echoed as the x402 `resource`. */
+  resourceUrl: string
+  /** Rails the agent lists but can't take payments on right now. */
+  unavailableRails: string[]
+}
+
+/** Rail ids from a sidecar `unavailable_rails` field (402/503: objects; /info: strings). */
+function parseUnavailableRails(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .map((u: any) => (typeof u === 'string' ? u : u?.rail))
+    .filter((r: unknown): r is string => typeof r === 'string')
+}
+
+/** A preflight refused because none of the agent's rails can take a payment now. */
+export class RailsUnavailableError extends Error {
+  constructor(public rails: string[]) {
+    super(`Payments via ${rails.join(', ') || 'this agent'} are temporarily unavailable — the agent can't see the network right now. Try again in a minute.`)
+  }
 }
 
 export async function invokePreflight(
@@ -125,8 +147,8 @@ export async function invokePreflight(
     await axios.post(url, form, { timeout: 90000, headers })
     throw new Error('Expected 402 Payment Required, but got success')
   } catch (err: any) {
-    if (err.response?.status === 402 && err.response.data?.payment_request) {
-      const pr = err.response.data.payment_request
+    if (err.response?.status === 402 && (err.response.data?.payment_request || err.response.data?.payment_options)) {
+      const pr = err.response.data.payment_request ?? {}
       const options: PaymentOption[] = err.response.data.payment_options ?? [{
         rail: pr.rail ?? 'TON',
         address: pr.address,
@@ -139,17 +161,38 @@ export async function invokePreflight(
       const claimNonce = String(primary.nonce ?? pr.nonce ?? memo)
       return {
         paymentRequest: {
-          address: pr.address,
-          amount: pr.amount,
+          address: pr.address ?? primary.address,
+          amount: pr.amount ?? primary.amount,
           nonce: claimNonce,
           memo,
-          rail: pr.rail,
+          rail: pr.rail ?? primary.rail,
         },
         paymentOptions: options,
+        accepts: Array.isArray(err.response.data.accepts) ? err.response.data.accepts : [],
+        resourceUrl: `${endpoint}/invoke`,
+        unavailableRails: parseUnavailableRails(err.response.data.unavailable_rails),
       }
+    }
+    if (err.response?.status === 503 && Array.isArray(err.response.data?.unavailable_rails)) {
+      throw new RailsUnavailableError(parseUnavailableRails(err.response.data.unavailable_rails))
     }
     throw err?.response?.data?.error ? new Error(err.response.data.error) : err
   }
+}
+
+const SETTLE_THROTTLE_REASONS: Record<string, string> = {
+  settle_in_progress: 'Another payment from this USDC account is being settled.',
+  source_cooldown: 'A recent payment from this USDC account failed on-chain.',
+  too_many_failed_settlements: 'Too many failed payments from your network.',
+}
+
+/** USDC x402 settle refused before broadcast (429): nothing was charged. */
+export function settleThrottledMessage(status: number | undefined, data: any): string | null {
+  if (status !== 429) return null
+  const reason = SETTLE_THROTTLE_REASONS[data?.error]
+  if (!reason) return null
+  const wait = Number(data?.retry_after_seconds) || 60
+  return `${reason} Nothing was charged — try again in ${wait} s.`
 }
 
 export async function invokeAgent(
@@ -162,6 +205,7 @@ export async function invokeAgent(
   fileFields?: Record<string, File>,
   rail?: string,
   sku?: string,
+  paymentSignature?: string,
 ): Promise<InvokeResult> {
   const form = buildMultipart(
     {
@@ -174,8 +218,20 @@ export async function invokeAgent(
     body,
     fileFields,
   )
-  const { url, headers } = resolveUrl(endpoint, '/invoke')
-  const { data } = await axios.post(url, form, { timeout: 90000, headers })
+  const resolved = resolveUrl(endpoint, '/invoke')
+  // x402: the payment rides in `PAYMENT-SIGNATURE`; `proof` carries the same
+  // value so a proxy that drops unknown headers cannot lose it.
+  const headers = paymentSignature
+    ? { ...(resolved.headers ?? {}), 'PAYMENT-SIGNATURE': paymentSignature }
+    : resolved.headers
+  let data
+  try {
+    ({ data } = await axios.post(resolved.url, form, { timeout: 90000, headers }))
+  } catch (err: any) {
+    const throttled = settleThrottledMessage(err?.response?.status, err?.response?.data)
+    if (throttled) throw new Error(throttled)
+    throw err
+  }
   return {
     jobId: data.job_id, status: data.status,
     result: data.result, error: data.error,
@@ -261,6 +317,8 @@ export async function fetchQuote(
 export interface AgentInfo {
   skus: Sku[]
   paymentRails: string[]
+  /** Listed rails that are down right now (stale payment monitor). */
+  unavailableRails: string[]
   name?: string
   description?: string
   capabilities?: string[]
@@ -283,6 +341,8 @@ export async function fetchAgentInfo(endpoint: string): Promise<AgentInfo> {
         free: s.free === true ? true : undefined,
         priceTon: typeof s.price_ton === 'number' ? s.price_ton : undefined,
         priceUsdt: typeof s.price_usd === 'number' ? s.price_usd : undefined,
+        priceSol: typeof s.price_sol === 'number' ? s.price_sol : undefined,
+        priceUsdc: typeof s.price_usdc === 'number' ? s.price_usdc : undefined,
         stockLeft: typeof s.stock_left === 'number' ? s.stock_left : undefined,
         total: typeof s.total === 'number' ? s.total : undefined,
         sold: typeof s.sold === 'number' ? s.sold : undefined,
@@ -292,6 +352,7 @@ export async function fetchAgentInfo(endpoint: string): Promise<AgentInfo> {
   return {
     skus,
     paymentRails,
+    unavailableRails: parseUnavailableRails(data?.unavailable_rails),
     name: typeof data?.name === 'string' ? data.name : undefined,
     description: typeof data?.description === 'string' ? data.description : undefined,
     capabilities: Array.isArray(data?.capabilities) ? data.capabilities.map(String) : undefined,

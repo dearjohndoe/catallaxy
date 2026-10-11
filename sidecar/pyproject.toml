@@ -11,6 +11,7 @@ dependencies = [
     "python-dotenv>=1.0.1,<2",
     "aiosqlite==0.20.0",
     "tonutils==2.0.4",
+    "solders>=0.26,<0.27",
 ]
 
 [project.optional-dependencies]
@@ -24,4 +25,4 @@ py-modules = ["sidecar", "settings", "jobs", "stock", "storage"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["payments*", "cli*", "api*", "chains*"]
+include = ["payments*", "cli*", "api*", "chains*", "owner_bot*"]

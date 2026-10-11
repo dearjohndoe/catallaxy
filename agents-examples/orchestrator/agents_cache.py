@@ -34,6 +34,11 @@ class AgentInfo:
     avatar_url: str | None = None
     images: tuple[str, ...] = field(default_factory=tuple)
     capabilities: tuple[str, ...] = ()
+    # Payment rails/prices from the heartbeat; Solana rails may be the only ones.
+    rails: tuple[str, ...] = ()
+    price_sol: int = 0     # lamports
+    price_usdc: int = 0    # micro-USDC
+    chains: tuple[str, ...] = ("ton",)  # registries the agent was found in
 
 
 def _parse_heartbeat_body(body_b64: str) -> dict[str, Any] | None:
@@ -91,6 +96,9 @@ def _parse_tx(tx: dict[str, Any]) -> AgentInfo | None:
             avatar_url=payload.get("avatar_url") or None,
             images=images,
             capabilities=caps,
+            rails=tuple(str(r).upper() for r in payload.get("rails") or () if r),
+            price_sol=int(payload.get("price_sol") or 0),
+            price_usdc=int(payload.get("price_usdc") or 0),
         )
     except Exception:
         return None

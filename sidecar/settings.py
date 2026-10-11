@@ -48,19 +48,32 @@ class AgentSku:
     price_usd: int | None   # micro-USD, None if USDT rail not supported
     initial_stock: int | None  # None => infinite (no stock tracking)
     kind: SkuKind = SkuKind.STATIC
+    price_usdc: int | None = None  # micro-USDC on Solana; None if rail off
+    price_sol: int | None = None   # lamports (native SOL); None if rail off
 
     # rail_id -> price accessors over the price_ton/price_usd backing fields, so
     # rail-agnostic code needn't branch on "TON"/"USDT".
     def price_for(self, rail_id: str) -> int | None:
-        """Price on ``rail_id`` (nanoton for TON, micro-USD for USDT), or None
+        """Price on ``rail_id`` (nanoton for TON, micro-USD for USDT / USDC,
+        lamports for SOL), or None
         if the rail isn't priced. A price of 0 is the dynamic-pricing sentinel."""
-        return {"TON": self.price_ton, "USDT": self.price_usd}.get(rail_id)
+        return {
+            "TON": self.price_ton,
+            "USDT": self.price_usd,
+            "USDC": self.price_usdc,
+            "SOL": self.price_sol,
+        }.get(rail_id)
 
     @property
     def prices(self) -> dict[str, int]:
         """rail_id -> price for every priced rail (unpriced rails omitted)."""
         return {
-            r: p for r, p in (("TON", self.price_ton), ("USDT", self.price_usd))
+            r: p for r, p in (
+                ("TON", self.price_ton),
+                ("USDT", self.price_usd),
+                ("USDC", self.price_usdc),
+                ("SOL", self.price_sol),
+            )
             if p is not None
         }
 
@@ -73,9 +86,10 @@ class Settings:
     agent_description: str
     agent_price: int
     agent_endpoint: str
-    agent_wallet_pk: str
+    # TON key/wallet: None on a Solana-only agent (no TON/USDT rails).
+    agent_wallet_pk: str | None
     agent_wallet_seed: str | None
-    agent_wallet: str
+    agent_wallet: str | None
     registry_address: str
     port: int
     payment_timeout: int
@@ -114,6 +128,29 @@ class Settings:
     # TEP-74 minter — then also set TON_JETTON_WALLET_CODE.
     usdt_master: str = USDT_MASTER_MAINNET
     jetton_wallet_code_hex: str | None = None
+    sol_wallet_pk: str | None = None
+    sol_wallet: str | None = None
+    sol_rpc_url: str | None = None
+    sol_cluster: str = "mainnet"
+    sol_usdc_mint: str | None = None
+    agent_price_usdc: int | None = None
+    agent_price_sol: int | None = None
+    # Native SOL rail: lamports kept from each refund (buyer pays the tx fee,
+    # like refund_fee_nanoton on TON) and the commitment we deliver on.
+    sol_refund_fee_lamports: int = 5_000
+    # USDC rail: micro-USDC kept from each refund, and extra when the refund
+    # has to recreate the buyer's USDC account (rent paid by the seller).
+    sol_usdc_refund_fee: int = 5_000
+    sol_usdc_refund_ata_fee: int = 200_000
+    # USDC settle throttles (the seller pays SOL for settles that fail
+    # on-chain): cooldown per buyer token account, cap per client IP.
+    sol_usdc_source_cooldown_seconds: int = 60
+    sol_usdc_ip_max_failed_settles: int = 5
+    sol_usdc_ip_failure_window_seconds: int = 600
+    sol_commitment: str = "confirmed"
+    # Solana discovery registry wallet. None → no Solana heartbeat (mainnet has
+    # no default yet).
+    sol_registry_address: str | None = None
 
     @property
     def capability(self) -> str:
@@ -170,7 +207,9 @@ def _derive_wallet_address(pk_hex: str, testnet: bool) -> str:
     )
 
 
-def _parse_sku_prices(price_spec: list[str], sku_id: str) -> tuple[int | None, int | None, SkuKind]:
+def _parse_sku_prices(
+    price_spec: list[str], sku_id: str,
+) -> tuple[int | None, int | None, int | None, int | None, SkuKind]:
     """Parse price tokens like ['ton=1000000000', 'usd=1500000'].
 
     Special forms:
@@ -187,10 +226,12 @@ def _parse_sku_prices(price_spec: list[str], sku_id: str) -> tuple[int | None, i
     if any(t.lower() == "free" for t in tokens):
         if len(tokens) != 1:
             raise RuntimeError(f"SKU '{sku_id}': 'free' cannot be combined with other price tokens")
-        return None, None, SkuKind.FREE
+        return None, None, None, None, SkuKind.FREE
 
     price_ton: int | None = None
     price_usd: int | None = None
+    price_usdc: int | None = None
+    price_sol: int | None = None
     for token in tokens:
         if "=" not in token:
             raise RuntimeError(f"SKU '{sku_id}': invalid price token '{token}' (expected ton=<n> or usd=<n>)")
@@ -212,11 +253,19 @@ def _parse_sku_prices(price_spec: list[str], sku_id: str) -> tuple[int | None, i
             price_ton = ival
         elif key == "usd":
             price_usd = ival
+        elif key == "usdc":
+            if ival == 0:
+                raise RuntimeError(f"SKU '{sku_id}': usdc dynamic pricing is not supported")
+            price_usdc = ival
+        elif key == "sol":
+            if ival == 0:
+                raise RuntimeError(f"SKU '{sku_id}': sol dynamic pricing is not supported")
+            price_sol = ival
         else:
-            raise RuntimeError(f"SKU '{sku_id}': unknown price key '{key}' (use ton or usd)")
+            raise RuntimeError(f"SKU '{sku_id}': unknown price key '{key}' (use ton, usd, usdc, or sol)")
 
-    if price_ton is None and price_usd is None:
-        raise RuntimeError(f"SKU '{sku_id}': at least one of ton/usd price required")
+    if price_ton is None and price_usd is None and price_usdc is None and price_sol is None:
+        raise RuntimeError(f"SKU '{sku_id}': at least one of ton/usd/usdc/sol price required")
 
     # Any priced rail at 0 is the dynamic-pricing sentinel: that rail's price is
     # resolved at runtime via mode=prices. A SKU may mix a fixed rail with a
@@ -225,7 +274,7 @@ def _parse_sku_prices(price_spec: list[str], sku_id: str) -> tuple[int | None, i
     # rub_anchored) is just the all-dynamic special case of this rule.
     kind = SkuKind.DYNAMIC if price_ton == 0 or price_usd == 0 else SkuKind.STATIC
 
-    return price_ton, price_usd, kind
+    return price_ton, price_usd, price_usdc, price_sol, kind
 
 
 def _parse_tg_user_ids(raw: str) -> tuple[int, ...]:
@@ -297,12 +346,13 @@ def _parse_skus(raw_skus: str, raw_titles: str) -> tuple[AgentSku, ...]:
             if initial_stock < 0:
                 raise RuntimeError(f"SKU '{sku_id}': stock must be >= 0")
 
-        price_ton, price_usd, kind = _parse_sku_prices(parts[2:], sku_id)
+        price_ton, price_usd, price_usdc, price_sol, kind = _parse_sku_prices(parts[2:], sku_id)
         title = titles.get(sku_id) or sku_id
         skus.append(AgentSku(
             sku_id=sku_id, title=title,
             price_ton=price_ton, price_usd=price_usd,
             initial_stock=initial_stock, kind=kind,
+            price_usdc=price_usdc, price_sol=price_sol,
         ))
 
     if not skus:
@@ -311,7 +361,7 @@ def _parse_skus(raw_skus: str, raw_titles: str) -> tuple[AgentSku, ...]:
     # All paid SKUs must share the same rail set. FREE SKUs have no rails and are
     # excluded so they can coexist with paid SKUs.
     rail_sets = {
-        tuple(sorted([r for r, v in (("TON", s.price_ton), ("USD", s.price_usd)) if v is not None]))
+        tuple(sorted([r for r, v in (("TON", s.price_ton), ("USD", s.price_usd), ("USDC", s.price_usdc), ("SOL", s.price_sol)) if v is not None]))
         for s in skus if s.kind is not SkuKind.FREE
     }
     if len(rail_sets) > 1:
@@ -354,10 +404,6 @@ def load_settings(env_file: str | None = None) -> Settings:
         "AGENT_ENDPOINT",
     ]
     missing = [key for key in required_keys if not os.getenv(key)]
-    # TON chain key: per-chain TON_WALLET_PK, legacy AGENT_WALLET_PK.
-    agent_wallet_pk = _chain_env("TON", "WALLET_PK", "AGENT_WALLET_PK")
-    if not agent_wallet_pk:
-        missing.append("TON_WALLET_PK (or AGENT_WALLET_PK)")
     if missing:
         raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
 
@@ -397,6 +443,83 @@ def load_settings(env_file: str | None = None) -> Settings:
         rails.append("TON")
     if base is not None and base.price_usd is not None:
         rails.append("USDT")
+    agent_price_usdc: int | None = None
+    if base is not None and base.price_usdc is not None:
+        rails.append("USDC")
+        non_zero_usdc = [s.price_usdc for s in skus if s.kind is not SkuKind.FREE and s.price_usdc]
+        agent_price_usdc = min(non_zero_usdc) if non_zero_usdc else base.price_usdc
+    elif not raw_skus and os.getenv("AGENT_PRICE_USDC"):
+        agent_price_usdc = int(os.environ["AGENT_PRICE_USDC"])
+        skus = tuple(
+            AgentSku(
+                sku_id=s.sku_id, title=s.title, price_ton=s.price_ton,
+                price_usd=s.price_usd, initial_stock=s.initial_stock,
+                kind=s.kind, price_usdc=agent_price_usdc,
+            )
+            for s in skus
+        )
+        rails.append("USDC")
+    agent_price_sol: int | None = None
+    if base is not None and base.price_sol is not None:
+        rails.append("SOL")
+        agent_price_sol = min(s.price_sol for s in skus if s.kind is not SkuKind.FREE and s.price_sol)
+
+    # TON chain key: per-chain TON_WALLET_PK, legacy AGENT_WALLET_PK. Needed for
+    # the TON rails; otherwise optional (then no TON heartbeat either) as long
+    # as there is a Solana key to heartbeat and refund with.
+    agent_wallet_pk = _chain_env("TON", "WALLET_PK", "AGENT_WALLET_PK") or None
+    ton_rails = [r for r in rails if r in ("TON", "USDT")]
+    if not agent_wallet_pk and (ton_rails or not _chain_env("SOL", "WALLET_PK")):
+        why = f"{'/'.join(ton_rails)} rail" if ton_rails else "an agent without SOL_WALLET_PK"
+        raise RuntimeError(f"Missing required env vars: TON_WALLET_PK (or AGENT_WALLET_PK) — needed for {why}")
+
+    sol_cluster_raw = (_chain_env("SOL", "CLUSTER") or "").strip().lower()
+    if _chain_env_bool("SOL", "TESTNET", default=False) or sol_cluster_raw in {"devnet", "testnet"}:
+        sol_cluster = "devnet"
+    else:
+        sol_cluster = "mainnet"
+    from chains.solana.constants import (
+        DEFAULT_RPC_DEVNET, DEFAULT_RPC_MAINNET, REGISTRY_ADDRESS_DEVNET, USDC_MINT_DEVNET, USDC_MINT_MAINNET,
+    )
+    sol_wallet_pk = _chain_env("SOL", "WALLET_PK")
+    sol_wallet: str | None = None
+    for sol_rail in ("USDC", "SOL"):
+        if sol_rail in rails and not sol_wallet_pk:
+            raise RuntimeError(f"{sol_rail} rail requires SOL_WALLET_PK")
+    sol_commitment = (_chain_env("SOL", "COMMITMENT") or "confirmed").strip().lower()
+    if sol_commitment not in {"confirmed", "finalized"}:
+        raise RuntimeError("SOL_COMMITMENT must be confirmed or finalized")
+    sol_refund_fee_lamports = int(_chain_env("SOL", "REFUND_FEE_LAMPORTS") or "5000")
+    if sol_refund_fee_lamports < 0:
+        raise RuntimeError("SOL_REFUND_FEE_LAMPORTS must be >= 0")
+    sol_usdc_refund_fee = int(_chain_env("SOL", "USDC_REFUND_FEE") or "5000")
+    sol_usdc_refund_ata_fee = int(_chain_env("SOL", "USDC_REFUND_ATA_FEE") or "200000")
+    if sol_usdc_refund_fee < 0 or sol_usdc_refund_ata_fee < 0:
+        raise RuntimeError("SOL_USDC_REFUND_FEE / SOL_USDC_REFUND_ATA_FEE must be >= 0")
+    sol_usdc_source_cooldown_seconds = int(_chain_env("SOL", "USDC_SOURCE_COOLDOWN_SEC") or "60")
+    sol_usdc_ip_max_failed_settles = int(_chain_env("SOL", "USDC_IP_MAX_FAILED_SETTLES") or "5")
+    sol_usdc_ip_failure_window_seconds = int(_chain_env("SOL", "USDC_IP_FAILURE_WINDOW_SEC") or "600")
+    if min(sol_usdc_source_cooldown_seconds, sol_usdc_ip_max_failed_settles,
+           sol_usdc_ip_failure_window_seconds) < 0:
+        raise RuntimeError("SOL_USDC_SOURCE_COOLDOWN_SEC / SOL_USDC_IP_* must be >= 0")
+    if sol_wallet_pk:
+        from chains.solana.wallet import parse_solana_keypair
+        sol_wallet = str(parse_solana_keypair(sol_wallet_pk).pubkey())
+    sol_rpc_url = _chain_env("SOL", "RPC_URL") or (
+        DEFAULT_RPC_DEVNET if sol_cluster == "devnet" else DEFAULT_RPC_MAINNET
+    )
+    sol_usdc_mint = _chain_env("SOL", "USDC_MINT") or (
+        USDC_MINT_DEVNET if sol_cluster == "devnet" else USDC_MINT_MAINNET
+    )
+    sol_registry_address = (_chain_env("SOL", "REGISTRY_ADDRESS") or "").strip() or (
+        REGISTRY_ADDRESS_DEVNET if sol_cluster == "devnet" else None
+    )
+    if sol_registry_address:
+        from solders.pubkey import Pubkey
+        try:
+            Pubkey.from_string(sol_registry_address)
+        except ValueError:
+            raise RuntimeError(f"SOL_REGISTRY_ADDRESS is not a valid Solana address: {sol_registry_address!r}")
 
     agent_name = os.environ["AGENT_NAME"]
     slug = _agent_slug(agent_name)
@@ -416,7 +539,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         agent_description=os.environ["AGENT_DESCRIPTION"],
         agent_price=agent_price,
         agent_endpoint=os.environ["AGENT_ENDPOINT"],
-        agent_wallet=_derive_wallet_address(agent_wallet_pk, testnet),
+        agent_wallet=_derive_wallet_address(agent_wallet_pk, testnet) if agent_wallet_pk else None,
         agent_wallet_pk=agent_wallet_pk,
         agent_wallet_seed=_chain_env("TON", "WALLET_SEED", "AGENT_WALLET_SEED"),
         registry_address=_chain_env("TON", "REGISTRY_ADDRESS", default=REGISTRY_ADDRESS),
@@ -463,4 +586,19 @@ def load_settings(env_file: str | None = None) -> Settings:
             (_chain_env("TON", "JETTON_WALLET_CODE", "JETTON_WALLET_CODE") or "").strip()
             or None
         ),
+        sol_wallet_pk=sol_wallet_pk,
+        sol_wallet=sol_wallet,
+        sol_rpc_url=sol_rpc_url,
+        sol_cluster=sol_cluster,
+        sol_usdc_mint=sol_usdc_mint,
+        agent_price_usdc=agent_price_usdc,
+        agent_price_sol=agent_price_sol,
+        sol_refund_fee_lamports=sol_refund_fee_lamports,
+        sol_usdc_refund_fee=sol_usdc_refund_fee,
+        sol_usdc_refund_ata_fee=sol_usdc_refund_ata_fee,
+        sol_usdc_source_cooldown_seconds=sol_usdc_source_cooldown_seconds,
+        sol_usdc_ip_max_failed_settles=sol_usdc_ip_max_failed_settles,
+        sol_usdc_ip_failure_window_seconds=sol_usdc_ip_failure_window_seconds,
+        sol_commitment=sol_commitment,
+        sol_registry_address=sol_registry_address,
     )

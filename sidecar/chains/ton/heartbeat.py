@@ -60,20 +60,50 @@ class HeartbeatConfig:
     images: tuple[str, ...] = field(default_factory=tuple)
     owner_wallet: str | None = None
     rails: tuple[str, ...] = field(default_factory=lambda: ("TON",))
+    price_usdc: int | None = None
+    price_sol: int | None = None
+
+
+class TonRegistry:
+    """``ChainRegistry`` for TON: 0.01 TON to the registry with the payload in
+    a heartbeat-opcode body."""
+
+    chain = "ton"
+    HEARTBEAT_NANOTON = 10_000_000
+
+    def __init__(self, transfer_sender: TransferFn, registry_address: str) -> None:
+        self._transfer_sender = transfer_sender
+        self._registry_address = registry_address
+
+    async def publish_heartbeat(self, payload: dict[str, Any]) -> str:
+        body = heartbeat_body(json.dumps(payload, ensure_ascii=False))
+        return await self._transfer_sender(self._registry_address, self.HEARTBEAT_NANOTON, body)
 
 
 class HeartbeatManager:
+    """Schedules heartbeats into one registry. One manager per chain; each keeps
+    its own timestamp field in the shared state file."""
+
     def __init__(
         self,
         config: HeartbeatConfig,
         state_store: StateStore,
-        transfer_sender: TransferFn,
+        transfer_sender: TransferFn | None = None,
         heartbeat_interval_days: int = 7,
         immediate_threshold_days: int = 6,
+        *,
+        registry: Any = None,
+        state_field: str = "last_heartbeat",
     ) -> None:
         self._config = config
         self._state_store = state_store
-        self._transfer_sender = transfer_sender
+        if registry is None:
+            if transfer_sender is None:
+                raise ValueError("HeartbeatManager needs a registry or a TON transfer_sender")
+            registry = TonRegistry(transfer_sender, config.registry_address)
+        self.registry = registry
+        self._state_field = state_field
+        self.chain: str = getattr(registry, "chain", "ton")
         self._interval = timedelta(days=heartbeat_interval_days)
         self._immediate_threshold = timedelta(days=immediate_threshold_days)
 
@@ -101,6 +131,10 @@ class HeartbeatManager:
             payload["has_quote"] = True
         if self._config.price_usdt is not None:
             payload["price_usdt"] = self._config.price_usdt
+        if self._config.price_usdc is not None:
+            payload["price_usdc"] = self._config.price_usdc
+        if self._config.price_sol is not None:
+            payload["price_sol"] = self._config.price_sol
         if self._config.owner_wallet:
             payload["owner_wallet"] = self._config.owner_wallet
 
@@ -115,10 +149,11 @@ class HeartbeatManager:
         return payload
 
     def _should_send_now(self, state: SidecarState) -> bool:
-        if not state.last_heartbeat:
+        last_raw = getattr(state, self._state_field)
+        if not last_raw:
             return True
         try:
-            last = datetime.fromisoformat(state.last_heartbeat.replace("Z", "+00:00"))
+            last = datetime.fromisoformat(last_raw.replace("Z", "+00:00"))
         except ValueError:
             return True
         return datetime.now(timezone.utc) - last >= self._immediate_threshold
@@ -128,14 +163,14 @@ class HeartbeatManager:
         if not force and not self._should_send_now(state):
             return False
 
-        payload = self._build_payload()
-        payload_json = json.dumps(payload, ensure_ascii=False)
-        body = heartbeat_body(payload_json)
-        await self._transfer_sender(self._config.registry_address, 10_000_000, body)
+        await self.registry.publish_heartbeat(self._build_payload())
 
-        state.last_heartbeat = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        # Re-load: the other chain's manager may have saved its own timestamp
+        # while this publish was in flight.
+        state = self._state_store.load()
+        setattr(state, self._state_field, datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
         self._state_store.save(state)
-        logger.info("Heartbeat sent")
+        logger.info("Heartbeat sent (%s)", self.chain)
         return True
 
     async def loop(self, stop_event: asyncio.Event) -> None:
@@ -148,7 +183,7 @@ class HeartbeatManager:
             try:
                 await self.send_if_needed(force=False)
             except Exception:
-                logger.exception("Heartbeat failed")
+                logger.exception("Heartbeat failed (%s)", self.chain)
                 failed = True
             sleep_for = 300 if failed else poll_timeout
             try:

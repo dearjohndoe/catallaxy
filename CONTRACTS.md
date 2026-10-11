@@ -26,6 +26,10 @@ Response `402` (`_invoke_helpers.py:80`):
   "payment_options": [ … ] }
 ```
 plus headers `x-ton-pay-address`, `x-ton-pay-amount`, `x-ton-pay-nonce`.
+When the SKU prices Solana USDC, the same 402 also carries x402 v2
+`PAYMENT-REQUIRED` (base64 JSON) and `accepts[]` in the body. Claim is
+`PAYMENT-SIGNATURE` / `X-PAYMENT` with a partially-signed TransferChecked;
+the sidecar is the fee payer and publishes. No split-nonce on that path.
 
 **`payment_option`** — one per rail:
 ```json
@@ -34,7 +38,34 @@ plus headers `x-ton-pay-address`, `x-ton-pay-amount`, `x-ton-pay-nonce`.
 // USDT (rail_usdt.py:69) — same + token block
 { "rail":"USDT", "address":"<agent_wallet>", "amount":"<micro-usdt>", "memo":"<nonce>",
   "token":{"symbol":"USDT","master":"<jetton_master>","decimals":6}, "sku":"<sku_id>" }
+// USDC (rail_usdc.py) — Solana x402 exact; ``memo`` unused by x402 clients
+{ "rail":"USDC", "address":"<sol_pubkey>", "amount":"<micro-usdc>", "memo":"<nonce>",
+  "token":{"symbol":"USDC","mint":"<mint>","decimals":6},
+  "network":"solana:…", "extra":{"feePayer":"<sol_pubkey>"}, "sku":"<sku_id>" }
+// SOL (rail_sol.py) — native, buyer broadcasts; ``memo`` is the literal Memo text
+{ "rail":"SOL", "address":"<sol_pubkey>", "amount":"<lamports>",
+  "memo":"CTLX:PAY:<pub>:<sidecar_id>", "network":"mainnet|devnet", "sku":"<sku_id>" }
 ```
+SOL: buyer sends SystemProgram transfer ≥ `amount` + Memo `memo` in one tx,
+then claims `{rail:"SOL", proof:<signature>, nonce:<full nonce>}` (split-nonce,
+same as TON). Verify is by memo `pub` via the sidecar's
+`getSignaturesForAddress` poller; `proof` is only a lookup hint and is accepted
+iff that tx carries the same memo. First tx with a given memo owns it. Refund =
+SOL transfer `amount − SOL_REFUND_FEE_LAMPORTS` + Memo `CTLX:REFUND:{"tx","reason","sidecar_id"}`;
+skipped when it would leave the recipient or the seller below rent-exempt (rent read from RPC).
+USDC (x402 exact, seller = fee payer): CU limit ≤ 60 000, priority fee ≤ 30 000 lamports, CU price ≤ 5 lamports/CU (spec). USDC refund = `amount − SOL_USDC_REFUND_FEE` (− `SOL_USDC_REFUND_ATA_FEE` if the buyer's USDC account is missing); none if ≤ 0. Delivery on `confirmed`. USDC settle throttles → `429 {"error":"settle_in_progress"|"source_cooldown"|"too_many_failed_settlements","retry_after_seconds":N}` + `Retry-After` (one settle per buyer token account; cooldown after an on-chain failure; cap on on-chain failures per IP).
+
+**Underpaid claim (TON / USDT / SOL).** If the memo's tx is on-chain but below
+price, `/invoke` answers `402 {"error":"Transaction amount is lower than required price",
+"refund_pending":true,"tx":<on-chain hash>,"paid":"<n>","required":"<n>"}` and
+queues a refund under `{chain}:{tx_hash}` (not `{chain}:pub:{pub}`), so the same
+claim nonce stays usable for a full top-up under the same memo. Memo with no
+money to us → plain 402, nothing queued.
+
+**Quotes are TON/USDT-only.** A quote prices only `price`/`price_usdt`, so a
+quoted 402 lists only TON/USDT options, and `/invoke` with `quote_id` on SOL or
+USDC returns `400 {"error":"quote_not_supported_for_rail","supported_rails":["TON","USDT"]}`
+before the quote is locked.
 `memo` = nonce = `{uuid16}:{sidecar_id}` — binds the payment to one order + one agent.
 
 ### `POST /invoke` — claim mode (`{tx, nonce, sku, body}`)
@@ -67,7 +98,9 @@ Every body = `uint32 opcode` + payload. Opcodes in `chains/ton/transfer.py`, `ch
 
 **Heartbeat descriptor** (`heartbeat.py`, ≤900 bytes, CTLX/2 thin):
 `sidecar_id, name, endpoint, rails, price_hint` (+ `price` alias, optional `capabilities` /
-`price_usdt` / `has_quote` / `owner_wallet`). Fat fields (`args_schema`, `result_schema`,
+`price_usdt` / `price_usdc` / `price_sol` / `has_quote` / `owner_wallet`). Same payload goes to the
+Solana registry as SOL transfer + Memo `CTLX:REG:<json>` (`chains/solana/registry.py`); each
+registry keeps its own timestamp in the state file (`last_heartbeat` TON, `last_sol_heartbeat`). Fat fields (`args_schema`, `result_schema`,
 `description`, media) live on `GET /info`. Readers still accept CTLX/1 fat payloads.
 
 **USDT (jetton, TEP-74)** — two opcodes:
@@ -144,5 +177,6 @@ stock_reservations ( key TEXT PRIMARY KEY, sku_id, expires_at, job_id, created_a
   `sec` only in the 402 JSON). `{tx, pub}` is not enough to claim. This proves the claimant
   saw the 402, not that they hold the paying key. `/result/{job_id}` is a capability URL.
 - **Rating is sybil-able.** No self-dealing discount, `MIN_RATING_TXS=1`, score over one RPC page.
-- **Solana/x402 is a plan, not code.** Этап 1 (thin heartbeat, generic `{rail,proof,nonce}`,
-  split-nonce) сел на TON-стороне. `chains/solana/` и разбор `X-PAYMENT` ещё нет.
+- **No Solana mainnet registry yet.** `SOL_REGISTRY_ADDRESS` defaults to the devnet
+  registry on devnet and is unset on mainnet, so mainnet agents skip the Solana heartbeat
+  and clients find them only through the TON registry.

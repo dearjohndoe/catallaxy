@@ -18,10 +18,12 @@ from payments.refund_queue import RefundQueue
 def test_chain_for_rail_maps_ton_rails_to_ton():
     assert chain_for_rail("TON") == "ton"
     assert chain_for_rail("USDT") == "ton"
+    assert chain_for_rail("USDC") == "solana"
+    assert chain_for_rail("SOL") == "solana"
 
 
 def test_chain_for_rail_unknown_falls_back_to_lowercase():
-    assert chain_for_rail("SOL") == "sol"
+    assert chain_for_rail("TRX") == "trx"
 
 
 def test_namespaced_tx_key_prefixes_bare_hash():

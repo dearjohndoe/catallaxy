@@ -3,6 +3,7 @@ import type { CallStatus } from './types'
 import type { QuoteResult, PaymentOption, ConnectionMode } from '../../lib/agentClient'
 import { getConnectionMode } from '../../lib/agentClient'
 import type { Sku, Agent } from '../../types'
+import { agentRails } from '../../lib/agents'
 
 export function useCallState(agent: Agent) {
   const [fields, setFields] = useState<Record<string, string>>({})
@@ -14,10 +15,9 @@ export function useCallState(agent: Agent) {
   const [quoteSecondsLeft, setQuoteSecondsLeft] = useState(0)
   const [lastNonce, setLastNonce] = useState('')
   const [paymentOptions, setPaymentOptions] = useState<PaymentOption[]>([])
-  const [selectedRail, setSelectedRail] = useState<string>(() =>
-    agent.price > 0 ? 'TON' : agent.priceUsdt ? 'USDT' : 'TON'
-  )
+  const [selectedRail, setSelectedRail] = useState<string>(() => agentRails(agent)[0] ?? 'TON')
   const [paymentRails, setPaymentRails] = useState<string[]>([])
+  const [unavailableRails, setUnavailableRails] = useState<string[]>([])
   const [connMode, setConnMode] = useState<ConnectionMode>(() => getConnectionMode(agent.endpoint))
   const [skus, setSkus] = useState<Sku[]>([])
   const [selectedSkuId, setSelectedSkuId] = useState<string>('')
@@ -41,6 +41,7 @@ export function useCallState(agent: Agent) {
     paymentOptions, setPaymentOptions,
     selectedRail, setSelectedRail,
     paymentRails, setPaymentRails,
+    unavailableRails, setUnavailableRails,
     connMode, setConnMode,
     skus, setSkus,
     selectedSkuId, setSelectedSkuId,

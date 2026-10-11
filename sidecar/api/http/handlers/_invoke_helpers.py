@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 from chains.base import ChainRail, chain_for_rail, namespaced_pub_key, namespaced_tx_key
-from payments import PaymentVerificationError, mint_nonce, pub_from_nonce
+from chains.solana.x402 import encode_payment_required_header, payment_required_body
+from payments import PaymentVerificationError, UnderpaidPayment, mint_nonce, pub_from_nonce
 from settings import AgentSku
 
 from api.http.responses import render_done_response
@@ -26,6 +27,9 @@ logger = logging.getLogger("sidecar")
 # payment-freshness check (ton_verifier, anchored to on-chain tx time) is
 # what actually bounds how long a payment session can be.
 CLAIM_SECRET_TTL_SECONDS = 3600
+
+# Rails a quote can price (QuoteEntry has only ``price``/``price_usdt``).
+QUOTE_RAILS = frozenset({"TON", "USDT"})
 
 
 def unlock_quote(quote_id: str | None, sidecar: "SidecarApp") -> None:
@@ -80,7 +84,7 @@ async def enqueue_refund_after_payment(
     ``mark_processed`` has already run but service was NOT delivered.
     """
     unlock_quote(parsed.quote_id, sidecar)
-    queue_key = payment_identity_key(parsed.rail, parsed.nonce)
+    queue_key = parsed.identity or payment_identity_key(parsed.rail, parsed.nonce)
     if queue_key is None:
         # Should be unreachable after split-nonce rebind; never fall back to
         # client tx (that was the refund+goods split).
@@ -123,6 +127,55 @@ async def enqueue_refund_after_payment(
     )
 
 
+RAIL_RETRY_AFTER_SECONDS = 60
+
+
+def monitor_max_age() -> float:
+    try:
+        return float(os.environ.get("PAYMENT_MONITOR_MAX_AGE_SEC", "60"))
+    except ValueError:
+        return 60.0
+
+
+def unavailable_rail_ids(sidecar: "SidecarApp") -> list[str]:
+    """Advertised rails whose monitor is stale right now (for /info)."""
+    max_age = monitor_max_age()
+    return [
+        rail_id for rail_id in sidecar.settings.payment_rails
+        if (rail := sidecar.rails.get(rail_id)) is not None and not _rail_healthy(rail, max_age)
+    ]
+
+
+def _rail_healthy(rail: ChainRail, max_age: float) -> bool:
+    try:
+        return bool(rail.monitor_healthy(max_age))
+    except Exception:
+        # Safer to offer the rail than to hide it over a check bug.
+        logger.exception("monitor_healthy raised for rail=%s", rail.rail_id)
+        return True
+
+
+def unavailable_entries(rail_ids: list[str]) -> list[dict[str, Any]]:
+    return [
+        {"rail": rail_id, "reason": "monitor_degraded", "retry_after_seconds": RAIL_RETRY_AFTER_SECONDS}
+        for rail_id in rail_ids
+    ]
+
+
+def rails_unavailable_response(rail_ids: list[str]) -> web.Response:
+    """503 for a preflight none of whose requested rails can take a payment now."""
+    return web.json_response(
+        {
+            "error": "service temporarily unavailable",
+            "detail": f"payment monitor degraded ({', '.join(rail_ids)})",
+            "retry_after_seconds": RAIL_RETRY_AFTER_SECONDS,
+            "unavailable_rails": unavailable_entries(rail_ids),
+        },
+        status=503,
+        headers={"Retry-After": str(RAIL_RETRY_AFTER_SECONDS)},
+    )
+
+
 async def build_402_response(
     parsed: "ParsedInvoke",
     sku: AgentSku,
@@ -137,13 +190,9 @@ async def build_402_response(
     if view.stock_left is not None and view.stock_left <= 0:
         return web.json_response({"error": "out_of_stock", "sku": sku.sku_id}, status=409)
 
-    # Monitor-health gate (plan D). If a rail we would advertise has no fresh
-    # successful poll, refuse the preflight with 503 — better than taking the
-    # payment when we can't detect it. Callers retry after `Retry-After`.
-    try:
-        max_age = float(os.environ.get("PAYMENT_MONITOR_MAX_AGE_SEC", "60"))
-    except ValueError:
-        max_age = 60.0
+    # Monitor-health gate (plan D): never advertise a rail whose monitor has no
+    # fresh successful poll — we could take the payment and not detect it.
+    max_age = monitor_max_age()
     # Rails this SKU can be paid on, each paired with the amount to charge. The
     # health gate and 402 body below are driven off these rail objects.
     priced: list[tuple[ChainRail, int]] = []
@@ -151,22 +200,27 @@ async def build_402_response(
         priced.append((sidecar.rails["TON"], min_ton))
     if eff_usd and min_usdt:
         priced.append((sidecar.rails["USDT"], min_usdt))
+    # A quoted request is only offered on rails the quote prices — otherwise
+    # the buyer would pay the static price and then be refused at claim.
+    if not parsed.quote_id:
+        if sku.price_usdc and "USDC" in sidecar.rails:
+            priced.append((sidecar.rails["USDC"], sku.price_usdc))
+        if sku.price_sol and "SOL" in sidecar.rails:
+            priced.append((sidecar.rails["SOL"], sku.price_sol))
 
-    unhealthy_rails = [r.rail_id for r, _ in priced if not r.monitor_healthy(max_age)]
-    if unhealthy_rails:
+    # A rail with a stale monitor is left out of the 402 but listed in
+    # `unavailable_rails`, so clients show it as down rather than missing —
+    # a Solana RPC outage must not stop TON sales. 503 only if no rail is left.
+    unavailable = [r for r, _ in priced if not _rail_healthy(r, max_age)]
+    if unavailable:
+        priced = [(r, amount) for r, amount in priced if r not in unavailable]
+        unavailable_ids = [r.rail_id for r in unavailable]
         logger.warning(
-            "preflight refused: payment monitor degraded for rails=%s sku=%s",
-            unhealthy_rails, sku.sku_id,
+            "preflight: payment monitor degraded for rails=%s sku=%s (offering %s)",
+            unavailable_ids, sku.sku_id, [r.rail_id for r, _ in priced] or "none",
         )
-        return web.json_response(
-            {
-                "error": "service temporarily unavailable",
-                "detail": f"payment monitor degraded ({', '.join(unhealthy_rails)})",
-                "retry_after_seconds": 60,
-            },
-            status=503,
-            headers={"Retry-After": "60"},
-        )
+        if not priced:
+            return rails_unavailable_response(unavailable_ids)
 
     # This happens when an SKU uses dynamic pricing and the agent omitted it from
     # `mode=prices` — typically because it's out of stock upstream. Emitting a
@@ -223,15 +277,36 @@ async def build_402_response(
         "payment_request": payment_options[0],
         "payment_options": payment_options,
     }
+    if unavailable:
+        resp_body["unavailable_rails"] = unavailable_entries(unavailable_ids)
 
     headers: dict[str, str] = {}
-    if eff_ton:
+    if any(r.rail_id == "TON" for r, _ in priced):
         headers["x-ton-pay-address"] = sidecar.settings.agent_wallet
         headers["x-ton-pay-amount"] = str(min_ton)
         # Public-only half, matching `memo` — NOT the full claim nonce. A
         # header-only client has no way to claim under the split-nonce
         # scheme (it never sees `sec`); see PROTOCOL.md §5.
         headers["x-ton-pay-nonce"] = pub_nonce
+
+    usdc_opts = [o for o in payment_options if o.get("rail") == "USDC"]
+    if usdc_opts and "USDC" in sidecar.rails:
+        usdc_rail = sidecar.rails["USDC"]
+        accepts = [
+            usdc_rail.x402_accepts_entry(
+                sku.price_usdc or 0,
+                resource_url=sidecar.settings.agent_endpoint,
+                description=sidecar.settings.agent_description,
+            )
+        ]
+        x402_body = payment_required_body(
+            accepts,
+            resource_url=sidecar.settings.agent_endpoint,
+            description=sidecar.settings.agent_description,
+        )
+        resp_body["accepts"] = accepts
+        resp_body["x402Version"] = 2
+        headers["PAYMENT-REQUIRED"] = encode_payment_required_header(x402_body)
 
     return web.json_response(resp_body, status=402, headers=headers)
 
@@ -243,8 +318,22 @@ async def verify_payment(
     min_ton: int,
     min_usdt: int,
 ) -> Any | web.Response:
-    """Run the right verifier (TON or USDT). Unlocks the quote on every error path."""
+    """Run the right verifier (TON, USDT, SOL). Unlocks the quote on every error path."""
     try:
+        if parsed.rail == "SOL":
+            sol_rail = sidecar.rails.get("SOL")
+            min_sol = sku.price_sol or 0
+            if sol_rail is None or min_sol <= 0:
+                # Unreachable via the SKU gate in handle_invoke; refuse before
+                # touching the chain rather than accept with a zero floor.
+                unlock_quote(parsed.quote_id, sidecar)
+                return web.json_response(
+                    {"error": "unsupported_rail_for_sku", "sku": sku.sku_id, "rail": "SOL"},
+                    status=400,
+                )
+            return await sol_rail.verify(
+                proof=parsed.tx_hash, nonce=parsed.nonce, min_amount=min_sol,
+            )
         if parsed.rail == "USDT":
             if not sidecar.jetton_verifier or not sidecar._agent_jetton_wallet:
                 # Try to bootstrap on the fly — covers both startup misconfig
@@ -314,8 +403,10 @@ async def verify_payment(
         return await sidecar.rails["TON"].verify(
             proof=parsed.tx_hash, nonce=parsed.nonce, min_amount=min_ton,
         )
+    except UnderpaidPayment as exc:
+        return await _refund_underpaid(parsed, sku, sidecar, exc)
     except PaymentVerificationError as exc:
-        # Verifier saw on-chain state and rejected: tx not found, wrong amount,
+        # Verifier saw on-chain state and rejected: tx not found, expired,
         # wrong recipient. Money may not exist — don't refund, let user fix.
         unlock_quote(parsed.quote_id, sidecar)
         return web.json_response({"error": str(exc)}, status=402)
@@ -329,6 +420,50 @@ async def verify_payment(
             sender=None, amount=None,
             reason="verifier_error",
         )
+
+
+async def _refund_underpaid(
+    parsed: "ParsedInvoke", sku: AgentSku, sidecar: "SidecarApp", exc: UnderpaidPayment,
+) -> web.Response:
+    """Real payment for this nonce, but below price: queue it for refund.
+
+    Keyed by the verified on-chain tx (``{chain}:{tx_hash}``), NOT by pub:
+    the pub stays claimable so a full top-up under the same memo can still be
+    delivered, while a retried claim of this same tx re-enqueues idempotently.
+    The tx can never also be delivered — it is below price on every verify.
+    """
+    unlock_quote(parsed.quote_id, sidecar)
+    paid = exc.payment
+    queue_key = namespaced_tx_key(chain_for_rail(parsed.rail), paid.tx_hash)
+    try:
+        await sidecar.refund_queue.enqueue(
+            tx_hash=queue_key, nonce=parsed.nonce, rail=parsed.rail,
+            sender=paid.sender, amount=paid.amount, sku_id=sku.sku_id,
+        )
+    except Exception:
+        logger.exception(
+            "underpaid refund enqueue failed tx=%s key=%s — manual reconciliation needed",
+            paid.tx_hash, queue_key,
+        )
+    logger.warning(
+        "underpaid payment queued for refund rail=%s tx=%s paid=%s required=%s",
+        parsed.rail, paid.tx_hash, paid.amount, exc.required,
+    )
+    if sidecar.owner_bot is not None:
+        sidecar.owner_bot.notify_refund(
+            sender=paid.sender, amount=paid.amount, rail=parsed.rail, sku_id=sku.sku_id,
+            tx_hash=paid.tx_hash, reason="underpaid", refund_tx=None, status="refund_pending",
+        )
+    return web.json_response(
+        {
+            "error": str(exc),
+            "refund_pending": True,
+            "tx": paid.tx_hash,
+            "paid": str(paid.amount),
+            "required": str(exc.required),
+        },
+        status=402,
+    )
 
 
 async def claim_stock(
@@ -363,7 +498,10 @@ async def claim_stock(
         refund_tx: str | None = None
         refund_send_failed = False
         try:
-            oos_key = payment_identity_key(parsed.rail, parsed.nonce)
+            oos_key = (
+                parsed.identity
+                or payment_identity_key(parsed.rail, parsed.nonce)
+            )
             if oos_key is None:
                 oos_key = namespaced_tx_key(
                     chain_for_rail(parsed.rail), verified_payment.tx_hash,

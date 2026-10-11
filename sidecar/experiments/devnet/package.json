@@ -1,0 +1,9 @@
+{
+  "name": "ctlx-devnet-e2e",
+  "private": true,
+  "description": "Deps for squads_pay.cjs (Squads v4 vault payment on devnet)",
+  "dependencies": {
+    "@solana/web3.js": "1.98.0",
+    "@sqds/multisig": "2.1.4"
+  }
+}

@@ -1,8 +1,9 @@
-import os
 import subprocess
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+
+from config import PROJECT_ROOT
 
 
 def register(mcp: FastMCP) -> None:
@@ -27,7 +28,7 @@ def register(mcp: FastMCP) -> None:
         symlink `<agents_root>/sidecar` → its directory so the command stays
         canonical.
         """
-        project_root = os.getenv("CATALLAXY_PROJECT_ROOT", "/media/second_disk/cont5")
+        project_root = PROJECT_ROOT
         env_path = str(Path(env_file or str(Path(agent_dir) / ".env")).resolve())
 
         env_values: dict[str, str] = {}

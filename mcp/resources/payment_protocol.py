@@ -46,6 +46,43 @@ attached for gas. The agent observes the resulting transfer_notification (0x7362
 its jetton wallet. Refunding a USDT payment costs gas from the agent's own TON wallet —
 keep a TON balance even on USDT-only agents.
 
+## Solana rails (SOL, USDC)
+
+Agents may also list themselves in the Solana registry (heartbeat = transfer + Memo
+`CTLX:REG:<json>`); `list_agents` merges both registries by `sidecar_id` and shows
+`chains` and `payment_rails`.
+
+**SOL** (native, same split-nonce as TON). The 402 option is
+`{"rail": "SOL", "address": <seller pubkey>, "amount": <lamports>, "memo": "CTLX:PAY:<pub>:<sidecar_id>", "nonce": ...}`.
+Pay with one transaction: SystemProgram transfer of >= `amount` to `address` plus a Memo
+instruction whose text is exactly `memo` (a Solana Pay URL with `&memo=` does this).
+Claim: POST /invoke {rail: "SOL", proof: <tx signature>, nonce, capability, body}.
+
+**USDC** (x402 `exact`, network CAIP-2 `solana:...`). The 402 body carries standard
+`accepts[]` and a `PAYMENT-REQUIRED` header; any x402 client can pay it. The payment is a
+transaction with SetComputeUnitLimit, SetComputeUnitPrice (<= 5 lamports per CU; wallets may raise it) and a
+TransferChecked of exactly `amount` to the seller's USDC token account, with fee payer =
+`extra.feePayer` (the seller). The buyer only SIGNS it; the claim sends it base64 in
+`payload.transaction` of the `PAYMENT-SIGNATURE` header (v1 `X-PAYMENT` also accepted).
+The seller co-signs as fee payer and broadcasts. No nonce. Quotes are TON/USDT only
+(`quote_not_supported_for_rail` on SOL/USDC).
+
+The seller pays SOL for a USDC settle that fails on-chain, so settles are throttled
+(nothing is charged; retry after `retry_after_seconds`):
+
+| HTTP | Body `error` | Meaning |
+|------|--------------|---------|
+| 429 | `settle_in_progress` | Another payment from the same USDC account is settling |
+| 429 | `source_cooldown` | A payment from this USDC account recently failed on-chain |
+| 429 | `too_many_failed_settlements` | Too many on-chain failures from your IP |
+
+## Unavailable rails
+
+If an agent can't watch a chain right now, that rail drops out of the 402 and is listed in
+`unavailable_rails: [{"rail", "reason", "retry_after_seconds"}]` (and in `/info` as rail ids).
+The rail is supported, just down — retry later or pay on another rail. If no rail is up,
+or you asked for a down rail explicitly, the agent answers 503 with the same field.
+
 ## Quote flow (for agents with AGENT_HAS_QUOTE=true)
 
 1. POST /quote {capability, body, sku?} → {price, plan, quote_id, ttl, price_usdt?}
@@ -87,5 +124,5 @@ use preflight + invoke_paid instead.
 def register_payment_protocol(mcp: FastMCP) -> None:
     @mcp.resource("catallaxy://spec/payment-protocol")
     def payment_protocol() -> str:
-        """HTTP 402 flow: nonce → TON TX → invoke, opcodes, quote flow for dynamic pricing."""
+        """HTTP 402 flow: nonce → payment (TON/USDT/SOL/USDC x402) → invoke, opcodes, quote flow."""
         return CONTENT

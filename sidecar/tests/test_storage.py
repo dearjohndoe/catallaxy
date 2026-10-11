@@ -75,7 +75,7 @@ def test_save_both_fields_none(tmp_state_path: str):
     store = StateStore(tmp_state_path)
     store.save(SidecarState())
     data = json.loads(Path(tmp_state_path).read_text(encoding="utf-8"))
-    assert data == {"last_heartbeat": None, "sidecar_id": None}
+    assert data == {"last_heartbeat": None, "sidecar_id": None, "last_sol_heartbeat": None}
 
 
 def test_load_empty_file_raises(tmp_state_path: str):

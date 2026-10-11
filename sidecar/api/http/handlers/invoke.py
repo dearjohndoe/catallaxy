@@ -12,9 +12,12 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 from aiohttp import web
 
-from payments import parse_nonce, split_full_nonce, PaymentIntentDraft, INTENT_REFUNDED
+from payments import (
+    parse_nonce, split_full_nonce, PaymentIntentDraft, INTENT_REFUNDED,
+    PaymentVerificationError,
+)
 from settings import AgentSku, SkuKind
-from chains.base import chain_for_rail, namespaced_pub_key, namespaced_tx_key
+from chains.base import RAIL_IDS, chain_for_rail, namespaced_pub_key, namespaced_tx_key
 
 from api.domain.invocation import create_runner
 from api.domain.pricing import resolve_sku
@@ -24,15 +27,19 @@ from api.infra.files import cleanup_uploaded_files
 from api.infra.rate_limit import client_ip
 from api.validation import validate_body
 from api.http.handlers._invoke_helpers import (
+    QUOTE_RAILS,
     build_402_response,
     build_agent_payload,
     claim_stock,
     consume_monitor_nonce,
     enqueue_refund_after_payment,
+    rails_unavailable_response,
     unlock_quote,
     verify_payment,
     wait_and_render,
 )
+from chains.solana.exact import SettleThrottled
+from chains.solana.x402 import extract_header_proof
 
 if TYPE_CHECKING:
     from api.app import SidecarApp
@@ -51,6 +58,9 @@ class ParsedInvoke:
     body: dict[str, Any]
     payload: dict[str, Any]  # full request payload (for validate_body)
     uploaded_files: dict[str, Path] = field(default_factory=dict)
+    x402: bool = False
+    rail_explicit: bool = False
+    identity: str | None = None
 
 
 async def _parse_invoke_request(
@@ -58,25 +68,34 @@ async def _parse_invoke_request(
 ) -> ParsedInvoke | web.Response:
     try:
         if request.content_type and "multipart/form-data" in request.content_type:
-            tx_hash, nonce, capability, quote_id, rail, sku_field, body, uploaded_files = \
+            tx_hash, nonce, capability, quote_id, raw_rail, sku_field, body, uploaded_files = \
                 await parse_multipart_invoke(request, file_store_dir)
+            header_proof = extract_header_proof(request.headers)
+            rail = raw_rail or ("USDC" if header_proof else "TON")
             return ParsedInvoke(
-                tx_hash=tx_hash, nonce=nonce, capability=capability,
+                tx_hash=tx_hash or header_proof or "", nonce=nonce, capability=capability,
                 quote_id=quote_id, rail=rail, sku_field=sku_field,
                 body=body, payload={"body": body}, uploaded_files=uploaded_files,
+                x402=bool(header_proof) or rail == "USDC",
+                rail_explicit=bool(raw_rail) or bool(header_proof),
             )
         data = await request.json()
         # v2 canonical field is ``proof``; ``tx`` is the CTLX/1 alias.
-        proof = str(data.get("proof") or data.get("tx") or "").strip()
+        header_proof = extract_header_proof(request.headers)
+        proof = str(data.get("proof") or data.get("tx") or header_proof or "").strip()
+        raw_rail = str(data.get("rail", "")).strip()
+        rail = raw_rail.upper() or ("USDC" if header_proof else "TON")
         return ParsedInvoke(
             tx_hash=proof,
             nonce=str(data.get("nonce", "")).strip(),
             capability=str(data.get("capability", "")).strip(),
             quote_id=str(data.get("quote_id", "")).strip() or None,
-            rail=str(data.get("rail", "")).strip().upper() or "TON",
+            rail=rail,
             sku_field=str(data.get("sku", "")).strip() or None,
             body=data.get("body", {}),
             payload=data,
+            x402=bool(header_proof) or rail == "USDC",
+            rail_explicit=bool(raw_rail) or bool(header_proof),
         )
     except Exception:
         return web.json_response({"error": "Invalid request"}, status=400)
@@ -157,6 +176,13 @@ def _monitor_healthy_for_rail(sidecar: "SidecarApp", rail: str) -> bool:
     underlying WalletMonitor — keeps tests able to monkey-patch at the
     verifier level.
     """
+    rail_obj = sidecar.rails.get(rail)
+    if rail_obj is not None and rail in {"USDC", "SOL"}:
+        try:
+            return bool(rail_obj.monitor_healthy(120.0))
+        except Exception:
+            logger.exception("_monitor_healthy_for_rail: %s is_healthy raised", rail)
+            return True
     if rail == "USDT":
         verifier = getattr(sidecar, "jetton_verifier", None)
     else:
@@ -295,12 +321,27 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
                 return job_id
             return await wait_and_render(job_id, sidecar)
 
-        # Rail-agnostic guard: reject a configured rail this SKU doesn't price.
-        # (Scoped to known rails to preserve the prior behaviour for unknown
-        # rail strings; the literal "TON"/"USDT" pair is gone.)
-        if parsed.rail in sidecar.rails and sku.price_for(parsed.rail) is None:
+        # Rail-agnostic guard: reject a known rail this SKU doesn't price —
+        # including one this agent has no rail object for (TON on a
+        # Solana-only agent). Unknown rail strings keep the prior behaviour.
+        if parsed.rail in RAIL_IDS and sku.price_for(parsed.rail) is None:
+            if not parsed.rail_explicit:
+                priced = list(sku.prices)
+                if priced:
+                    parsed = dataclasses.replace(parsed, rail=priced[0])
+            if sku.price_for(parsed.rail) is None:
+                return web.json_response(
+                    {"error": "unsupported_rail_for_sku", "sku": sku.sku_id, "rail": parsed.rail}, status=400,
+                )
+
+        # Quotes carry only TON/USDT prices; on SOL/USDC the static SKU price
+        # would be charged instead of the quoted one (seller underpaid).
+        # Rejected before the quote is looked up or locked.
+        if parsed.quote_id and parsed.rail not in QUOTE_RAILS:
             return web.json_response(
-                {"error": "unsupported_rail_for_sku", "sku": sku.sku_id, "rail": parsed.rail}, status=400,
+                {"error": "quote_not_supported_for_rail", "rail": parsed.rail,
+                 "supported_rails": sorted(QUOTE_RAILS)},
+                status=400,
             )
 
         eff_ton, eff_usd, min_ton, min_usdt = await _resolve_amounts(sku, sidecar)
@@ -309,44 +350,68 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
             return quote_err
 
         if not parsed.tx_hash:
-            if not _monitor_healthy_for_rail(sidecar, parsed.rail):
+            # Explicit rail: answer for that rail alone. Otherwise the 402
+            # drops whichever rails are down and lists them as unavailable.
+            if parsed.rail_explicit and not _monitor_healthy_for_rail(sidecar, parsed.rail):
                 logger.warning(
                     "invoke: monitor unhealthy for rail=%s, refusing preflight",
                     parsed.rail,
                 )
-                return web.json_response(
-                    {
-                        "error": "service temporarily unavailable",
-                        "detail": f"Wallet monitor for rail={parsed.rail} has no fresh on-chain view; retry shortly.",
-                        "retry_after_seconds": 60,
-                    },
-                    status=503,
-                    headers={"Retry-After": "60"},
-                )
+                return rails_unavailable_response([parsed.rail])
             return await build_402_response(parsed, sku, sidecar, eff_ton, eff_usd, min_ton, min_usdt)
 
         missing = validate_body(parsed.payload, sidecar.args_schema, has_tx=True, uploaded_files=uploaded_files)
         if missing:
             return web.json_response({"error": "Missing required fields", "missing": missing}, status=400)
-        if not parsed.nonce:
-            return web.json_response({"error": "nonce is required with tx"}, status=400)
 
         if parsed.quote_id and quote_entry:
             quote_entry.locked = True
 
-        nonce_meta = parse_nonce(parsed.nonce)
-        if not nonce_meta.value.endswith(f":{sidecar.sidecar_id}"):
-            unlock_quote(parsed.quote_id, sidecar)
-            return web.json_response({"error": "Nonce sidecar_id mismatch"}, status=402)
+        x402_claim = parsed.rail == "USDC" or parsed.x402
+        pub = ""
+        if x402_claim:
+            usdc_rail = sidecar.rails.get("USDC")
+            if usdc_rail is None:
+                unlock_quote(parsed.quote_id, sidecar)
+                return web.json_response(
+                    {"error": "unsupported_rail_for_sku", "sku": sku.sku_id, "rail": "USDC"},
+                    status=400,
+                )
+            min_usdc = sku.price_usdc or 0
+            if min_usdc <= 0:
+                unlock_quote(parsed.quote_id, sidecar)
+                return web.json_response({"error": "USDC price unavailable"}, status=402)
+            try:
+                inspected = usdc_rail.inspect(parsed.tx_hash, min_usdc)
+            except PaymentVerificationError as exc:
+                unlock_quote(parsed.quote_id, sidecar)
+                return web.json_response({"error": str(exc)}, status=402)
+            except Exception:
+                logger.exception("USDC inspect failed")
+                unlock_quote(parsed.quote_id, sidecar)
+                return web.json_response({"error": "invalid x402 payment"}, status=402)
+            identity_key = inspected.identity
+            parsed = dataclasses.replace(
+                parsed, rail="USDC", nonce=inspected.client_signature,
+                identity=identity_key, x402=True,
+            )
+        else:
+            if not parsed.nonce:
+                return web.json_response({"error": "nonce is required with tx"}, status=400)
 
-        # Split before any storage lookup: claim-block and refund-queue keys
-        # are ``{chain}:pub:{pub}``, not the client-supplied tx/proof.
-        split = split_full_nonce(parsed.nonce)
-        if split is None:
-            unlock_quote(parsed.quote_id, sidecar)
-            return web.json_response({"error": "invalid or expired claim"}, status=403)
-        pub, pub_nonce, sec = split
-        identity_key = namespaced_pub_key(chain_for_rail(parsed.rail), pub)
+            nonce_meta = parse_nonce(parsed.nonce)
+            if not nonce_meta.value.endswith(f":{sidecar.sidecar_id}"):
+                unlock_quote(parsed.quote_id, sidecar)
+                return web.json_response({"error": "Nonce sidecar_id mismatch"}, status=402)
+
+            # Split before any storage lookup: claim-block and refund-queue keys
+            # are ``{chain}:pub:{pub}``, not the client-supplied tx/proof.
+            split = split_full_nonce(parsed.nonce)
+            if split is None:
+                unlock_quote(parsed.quote_id, sidecar)
+                return web.json_response({"error": "invalid or expired claim"}, status=403)
+            pub, pub_nonce, sec = split
+            identity_key = namespaced_pub_key(chain_for_rail(parsed.rail), pub)
 
         if await sidecar.tx_store.is_processed(identity_key):
             unlock_quote(parsed.quote_id, sidecar)
@@ -375,40 +440,66 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
                 )
             # 'processed' falls through — should not happen unless racy
 
-        # Split-nonce claim-secret check (TODO-claim-auth.md, PROTOCOL.md
-        # §6.1) — front-running fix. `{tx, pub}` alone is everything a chain
-        # watcher can observe on-chain; `sec` never appears there, only in
-        # the 402 response body delivered to whoever requested it. Runs
-        # after the is_processed/refund-pending checks above (so legitimate
-        # retries on an already-settled payment still get those clearer errors)
-        # and before verify_payment (so a wrong guess never reaches chain
-        # RPC). Rejection here MUST NOT mark processed, consume the
-        # nonce, or enqueue a refund — a subsequent claim with the correct
-        # secret must still succeed (real payer isn't blocked by an
-        # attacker's failed guess).
-        claim_row = await sidecar.claim_secrets.check(pub)
-        if (
-            claim_row is None
-            or claim_row[1] <= int(time.time())
-            or claim_row[0] != hashlib.sha256(sec.encode()).hexdigest()
-        ):
-            unlock_quote(parsed.quote_id, sidecar)
-            return web.json_response({"error": "invalid or expired claim"}, status=403)
+        if x402_claim:
+            try:
+                verified = await usdc_rail.settle(
+                    inspected, client_key=client_ip(request, sidecar.settings),
+                )
+            except SettleThrottled as exc:
+                unlock_quote(parsed.quote_id, sidecar)
+                return web.json_response(
+                    {"error": exc.reason, "retry_after_seconds": exc.retry_after},
+                    status=429, headers={"Retry-After": str(exc.retry_after)},
+                )
+            except PaymentVerificationError as exc:
+                unlock_quote(parsed.quote_id, sidecar)
+                return web.json_response({"error": str(exc)}, status=402)
+            except Exception:
+                logger.exception("USDC settle failed")
+                unlock_quote(parsed.quote_id, sidecar)
+                return web.json_response(
+                    {"error": "settlement failed", "retry_after_seconds": 15},
+                    status=503, headers={"Retry-After": "15"},
+                )
+            parsed = dataclasses.replace(
+                parsed, tx_hash=verified.tx_hash, nonce=inspected.client_signature,
+            )
+        else:
+            # Split-nonce claim-secret check (TODO-claim-auth.md, PROTOCOL.md
+            # §6.1) — front-running fix. `{tx, pub}` alone is everything a chain
+            # watcher can observe on-chain; `sec` never appears there, only in
+            # the 402 response body delivered to whoever requested it. Runs
+            # after the is_processed/refund-pending checks above (so legitimate
+            # retries on an already-settled payment still get those clearer errors)
+            # and before verify_payment (so a wrong guess never reaches chain
+            # RPC). Rejection here MUST NOT mark processed, consume the
+            # nonce, or enqueue a refund — a subsequent claim with the correct
+            # secret must still succeed (real payer isn't blocked by an
+            # attacker's failed guess).
+            claim_row = await sidecar.claim_secrets.check(pub)
+            if (
+                claim_row is None
+                or claim_row[1] <= int(time.time())
+                or claim_row[0] != hashlib.sha256(sec.encode()).hexdigest()
+            ):
+                unlock_quote(parsed.quote_id, sidecar)
+                return web.json_response({"error": "invalid or expired claim"}, status=403)
 
-        # The secret has done its job at the gate above; nothing downstream
-        # (chain lookup, refund bookkeeping, the job runner) needs `sec`
-        # again, and it must not keep propagating in plaintext (e.g.
-        # refund_queue.pending_refunds.nonce, job runner logs). Rebind
-        # `parsed` to the public-only nonce for the rest of this function —
-        # `verify_payment` also needs `pub_nonce` here since it looks the tx
-        # up on-chain keyed by the value actually embedded in the memo/cell.
-        parsed = dataclasses.replace(parsed, nonce=pub_nonce)
-        verified = await verify_payment(parsed, sku, sidecar, min_ton, min_usdt)
-        if isinstance(verified, web.Response):
-            return verified
+            # The secret has done its job at the gate above; nothing downstream
+            # (chain lookup, refund bookkeeping, the job runner) needs `sec`
+            # again, and it must not keep propagating in plaintext (e.g.
+            # refund_queue.pending_refunds.nonce, job runner logs). Rebind
+            # `parsed` to the public-only nonce for the rest of this function —
+            # `verify_payment` also needs `pub_nonce` here since it looks the tx
+            # up on-chain keyed by the value actually embedded in the memo/cell.
+            parsed = dataclasses.replace(parsed, nonce=pub_nonce)
+            verified = await verify_payment(parsed, sku, sidecar, min_ton, min_usdt)
+            if isinstance(verified, web.Response):
+                return verified
 
-        # Canonical id after verify is the on-chain hash, never client proof.
-        parsed = dataclasses.replace(parsed, tx_hash=verified.tx_hash, nonce=pub_nonce)
+            # Canonical id after verify is the on-chain hash, never client proof.
+            parsed = dataclasses.replace(parsed, tx_hash=verified.tx_hash, nonce=pub_nonce)
+
         verified_key = namespaced_tx_key(chain_for_rail(parsed.rail), verified.tx_hash)
 
         async def evict_monitor() -> None:
@@ -487,10 +578,11 @@ async def handle_invoke(request: web.Request, sidecar: "SidecarApp") -> web.Resp
         # Post-success hygiene only, not a security gate: mark_processed's
         # PRIMARY KEY already made this claim single-use. Best-effort so a
         # store hiccup here never affects the response being built.
-        try:
-            await sidecar.claim_secrets.delete(pub)
-        except Exception:
-            logger.exception("claim_secrets.delete failed (best-effort) pub=%s", pub)
+        if pub:
+            try:
+                await sidecar.claim_secrets.delete(pub)
+            except Exception:
+                logger.exception("claim_secrets.delete failed (best-effort) pub=%s", pub)
 
         reservation_key, created_reservation_keys, stock_err = await claim_stock(parsed, sku, sidecar, verified)
         if stock_err is not None:

@@ -27,13 +27,17 @@ export interface Sku {
   free?: boolean         // free product: no on-chain payment
   priceTon?: number      // nanotons
   priceUsdt?: number     // micro-USDT (6 decimals)
+  priceSol?: number      // lamports
+  priceUsdc?: number     // micro-USDC (6 decimals)
   stockLeft?: number     // undefined = untracked / infinite
   total?: number
   sold?: number
 }
 
+export type Chain = 'ton' | 'solana'
+
 export interface Agent {
-  address: string       // sender of heartbeat TX (raw format)
+  address: string       // heartbeat sender: TON raw address, or Solana pubkey for Solana-only agents
   sidecarId: string     // unique per sidecar instance, used as dedup key
   name: string
   description: string
@@ -48,5 +52,9 @@ export interface Agent {
   previewUrl?: string
   avatarUrl?: string
   images?: string[]
+  chains?: Chain[]      // registries this agent was found in
+  rails?: string[]      // payment rails from the heartbeat (TON, USDT, SOL, USDC)
+  priceSol?: number     // lamports
+  priceUsdc?: number    // micro-USDC (6 decimals)
 }
 

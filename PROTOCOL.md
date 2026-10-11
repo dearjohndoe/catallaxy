@@ -19,7 +19,7 @@ Any layer can be implemented independently. A conforming *agent* is any HTTP ser
 | **Agent** | A service sold on the marketplace, identified by the pair (`sidecar_id`, wallet address). The wallet receives payments and sends heartbeats/refunds; it need not be unique per agent — attribution between agents sharing a wallet is carried by the `sidecar_id` suffix in nonces and payloads. |
 | **Sidecar** | Reference implementation of the agent side (wraps any stdin/stdout script). |
 | **Registry** | A well-known wallet address. The registry never signs anything; it is only a mailbox whose incoming transactions are read by clients. |
-| **Rail** | A payment route: `TON` (native) or `USDT` (TEP-74 jetton) in v1. |
+| **Rail** | A payment route: `TON` (native) or `USDT` (TEP-74 jetton) in v1; `SOL` (native) and `USDC` (x402) on Solana. |
 | **Client** | A buyer: a human frontend, an MCP-driven LLM, or another agent. |
 | **SKU** | A priced unit of inventory within an agent (an agent has ≥1 SKU). |
 
@@ -36,18 +36,25 @@ All protocol payloads embedded in transactions are TON cells: a 32-bit opcode fo
 
 ## 3. Registry layer
 
-**Registration = heartbeat.** The agent sends a transaction (any small amount, reference: 0.01 TON) to the registry address with opcode `0xAC52AB67` and a JSON payload:
+**Registration = heartbeat.** The agent sends a small transfer to the registry address carrying a JSON payload. Two registries share the payload format:
+
+- **TON:** any small amount (reference: 0.01 TON) with opcode `0xAC52AB67` and the JSON as a snake string.
+- **Solana:** a SOL transfer (reference: 0.00014 SOL, ≈ 0.01 TON) plus a Memo-program instruction `CTLX:REG:<json>` in the same transaction, signed by the agent's Solana key. The registry account must already exist rent-exempt.
+
+An agent heartbeats into every registry it has a key for, with the same `sidecar_id`; clients merge registries by `sidecar_id`. Payload:
 
 ```json
 {
   "sidecar_id": "…",            // required, stable identity
   "endpoint": "https://…",      // required, base URL of the agent HTTP API
   "name": "…",
-  "rails": ["TON", "USDT"],     // advertised payment rails
-  "price_hint": 10000000,       // advisory; same units as the first priced rail
+  "rails": ["TON", "USDT"],     // advertised payment rails: TON, USDT, SOL, USDC
+  "price_hint": 10000000,       // advisory TON price (nanoton); 0 when TON is not a rail
   "price": 10000000,            // CTLX/1 alias of price_hint (dual-written)
   "capabilities": ["…"],        // short tags for listing; optional
   "price_usdt": 1000000,        // optional USDT hint (micro-USDT)
+  "price_usdc": 1000000,        // optional Solana USDC hint (micro-USDC)
+  "price_sol": 2000000,         // optional native SOL hint (lamports)
   "has_quote": true,            // optional
   "owner_wallet": "…"           // optional; clients SHOULD cross-check 402 address
 }
@@ -60,6 +67,8 @@ Readers MUST still accept CTLX/1 fat heartbeats (those fields present) for N mon
 **Liveness window: 7 days.** Clients consider an agent listed iff a heartbeat exists within the last 7 days. Update = new heartbeat (latest wins). Deregistration = silence.
 
 **Discovery rule (client side):** fetch incoming transactions to the registry for the last 7 days, filter by opcode `0xAC52AB67`, parse JSON, drop entries without `endpoint` or `sidecar_id`, deduplicate by `sidecar_id` keeping the newest. Treat `price_hint` as `price` when `price` is absent.
+
+On Solana: `getSignaturesForAddress(registry)` already returns each transaction's memos in its `memo` field as `[len] text`, joined by `"; "` (`len` = UTF-8 bytes, so split by length, not by `"; "`). Take the memo starting with `CTLX:REG:`, skip rows with `err`; no `getTransaction` per row is needed. Reference reader: `sidecar/chains/solana/registry.py` (`read_registry`).
 
 The registry address is a client-side configuration default, not a protocol constant: anyone can run an alternative registry by pointing clients at a different address.
 
@@ -195,7 +204,7 @@ Any wallet MAY send a rating transaction to the agent's wallet: opcode `0x526174
 
 ## 10. Versioning
 
-This is CTLX/1 on the wire for TON cells/opcodes/jettons. CTLX/2 write-path pieces that have landed on the TON side: thin heartbeat (§3), split-nonce (§5 / §6.1), generic proof field `{rail, proof, nonce}` (`tx` remains an alias). Solana rails and x402 header handling are still in design (`MULTICHAIN_PLAN.md` этап 2).
+This is CTLX/1 on the wire for TON cells/opcodes/jettons. CTLX/2 write-path pieces that have landed on the TON side: thin heartbeat (§3), split-nonce (§5 / §6.1), generic proof field `{rail, proof, nonce}` (`tx` remains an alias). Solana rails (`SOL`, and `USDC` over x402 `exact`) are implemented in the sidecar, frontend and MCP; their wire format is in [`CONTRACTS.md`](CONTRACTS.md).
 
 ## Reference implementations
 

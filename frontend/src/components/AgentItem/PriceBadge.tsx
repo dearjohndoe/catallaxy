@@ -1,15 +1,27 @@
+import { Fragment } from 'react'
 import type { Agent } from '../../types'
-import { nanoToTon, microToUsdt } from './utils'
+import { formatRailPrice } from './utils'
+
+export function agentPrices(agent: Agent): [string, number][] {
+  const out: [string, number][] = []
+  if (agent.price > 0) out.push(['TON', agent.price])
+  if (agent.priceUsdt) out.push(['USDT', agent.priceUsdt])
+  if (agent.priceSol) out.push(['SOL', agent.priceSol])
+  if (agent.priceUsdc) out.push(['USDC', agent.priceUsdc])
+  return out
+}
 
 export function PriceBadge({ agent }: { agent: Agent }) {
-  const hasTon = agent.price > 0
-  const hasUsdt = agent.priceUsdt != null && agent.priceUsdt > 0
-  if (!hasTon && !hasUsdt) return <span>Dynamic price</span>
+  const prices = agentPrices(agent)
+  if (!prices.length) return <span>Dynamic price</span>
   return (
     <>
-      {hasTon && <span className="price-ton">{nanoToTon(agent.price)} TON</span>}
-      {hasTon && hasUsdt && <span className="price-sep"> / </span>}
-      {hasUsdt && <span className="price-usdt">{microToUsdt(agent.priceUsdt!)} USDT</span>}
+      {prices.map(([rail, amount], i) => (
+        <Fragment key={rail}>
+          {i > 0 && <span className="price-sep"> / </span>}
+          <span className={`price-${rail.toLowerCase()}`}>{formatRailPrice(rail, amount)}</span>
+        </Fragment>
+      ))}
     </>
   )
 }

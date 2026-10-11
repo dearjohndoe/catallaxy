@@ -11,7 +11,7 @@ from payments.nonce import _parse_payment_nonce, parse_nonce
 from .remote_monitor import RemoteWalletMonitor, _RelayClient, get_relay_url
 from .ton_monitor import WalletMonitor
 from payments.tonapi_client import TonAPIClient
-from payments.types import PaymentVerificationError, VerifiedPayment
+from payments.types import PaymentVerificationError, VerifiedPayment, underpaid_error
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +134,11 @@ class PaymentVerifier:
                     amount = 0
 
                 if amount < required_amount:
-                    raise PaymentVerificationError("Transaction amount is lower than required price")
+                    raise underpaid_error(
+                        tx_hash=tx.cell.hash.hex(), sender=sender,
+                        recipient=self._agent_wallet, amount=amount,
+                        comment=nonce.value, required=required_amount,
+                    )
 
                 if not sender:
                     raise PaymentVerificationError("Transaction sender is missing")

@@ -2,37 +2,29 @@
 
 > [English version](README.md)
 
-Простой reverse-proxy с автоматическим получением SSL от Let's Encrypt. Полностью заменяет связку NGINX + Certbot.
+HTTPS-прокси для агентов без своего сертификата. Браузер на HTTPS-странице не может обратиться к агенту по `http://`; шлюз принимает запрос по HTTPS и передаёт его агенту. Сертификат Let's Encrypt выпускается и продлевается сам.
 
-## Возможности
-- Сам получает и обновляет SSL сертификаты.
-- Проксирует запросы на адрес из заголовка `X-Agent-Endpoint` или параметра `?endpoint=`.
-- Добавляет нужные CORS-заголовки.
-- `GET /img?url=<http-image-url>` — прокси картинок: https-фронт может грузить
-  картинки с http-агентов без блокировки mixed-content.
-  - Только PNG / JPEG / GIF / WebP (SVG запрещён)
-  - Лимит ответа 5 MB
-  - Cookies и `Authorization` вырезаются в обе стороны
-  - Приватные IP блокируются через `safeDialContext`
+- **Куда проксировать.** Агента задаёт заголовок `X-Agent-Endpoint` или параметр `?endpoint=`. Шлюз добавляет CORS-заголовки.
+- **`GET /img?url=<http-image-url>`.** Прокси для картинок с http-агентов. Только PNG/JPEG/GIF/WebP (без SVG), до 5 МБ. Cookies и `Authorization` вырезаются, приватные сети заблокированы.
+- **`GET /health`.** Проверка живости.
+- **Лендинг.** На запрос без адреса агента отдаётся лендинг из `site/`.
 
-## Запуск через Docker
-Убедитесь, что A-запись вашего домена указывает на IP сервера.
+## Запуск
+
+A-запись домена должна указывать на сервер.
 
 ```bash
 docker build -t ssl-gateway .
-
-docker run -d \
-  --name ssl-gw \
-  --restart always \
-  -p 80:80 \
-  -p 443:443 \
-  -v $(pwd)/certs:/certs \
-  -e DOMAIN=api.tvoydomen.com \
-  ssl-gateway
-```
-
-## Логи
-
-```bash
+docker run -d --name ssl-gw --restart always \
+  -p 80:80 -p 443:443 -v $(pwd)/certs:/certs \
+  -e DOMAIN=api.yourdomain.com ssl-gateway
 docker logs -f ssl-gw
 ```
+
+| Переменная | По умолчанию | Назначение |
+|---|---|---|
+| `DOMAIN` | — | домен для сертификата; без него шлюз работает по обычному HTTP |
+| `LISTEN` | `:8080` | адрес без TLS (когда `DOMAIN` пуст) |
+| `TIMEOUT` | `120` | таймаут ответа агента, в секундах |
+
+Фронт подключает шлюз через `VITE_SSL_GATEWAY`.

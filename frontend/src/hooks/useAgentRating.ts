@@ -41,6 +41,8 @@ export function useAgentRating(agentAddress: string, sidecarId: string, enabled:
   const [error, setError] = useState(false)
 
   const load = useCallback(async (force = false) => {
+    // Solana-only agent: ratings are TON transactions, there is nothing to read.
+    if (!agentAddress && !USE_MOCK) return
     if (!force) {
       const cached = getCached(sidecarId)
       if (cached) {

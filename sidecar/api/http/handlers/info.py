@@ -8,6 +8,7 @@ from aiohttp import web
 from settings import SkuKind
 
 from api.domain.quoting import fetch_dynamic_prices, has_dynamic_skus
+from api.http.handlers._invoke_helpers import unavailable_rail_ids
 
 if TYPE_CHECKING:
     from api.app import SidecarApp
@@ -31,6 +32,11 @@ async def handle_info(_: web.Request, sidecar: "SidecarApp") -> web.Response:
     }
     if settings.has_quote:
         info["has_quote"] = True
+    # Rails listed but down right now (stale payment monitor): clients grey
+    # them out instead of hiding them; preflight leaves them out of the 402.
+    unavailable = unavailable_rail_ids(sidecar)
+    if unavailable:
+        info["unavailable_rails"] = unavailable
 
     # Always emit skus[] so clients can drive per-SKU UI. Legacy single-SKU
     # agents still see price/price_usdt top-level (populated from that SKU).
@@ -80,6 +86,11 @@ async def handle_info(_: web.Request, sidecar: "SidecarApp") -> web.Response:
                 entry["price_ton"] = price_ton
             if price_usd is not None:
                 entry["price_usd"] = price_usd
+            # Solana rails are always static (settings rejects sol/usdc=dynamic).
+            if sku_obj is not None and sku_obj.price_usdc is not None:
+                entry["price_usdc"] = sku_obj.price_usdc
+            if sku_obj is not None and sku_obj.price_sol is not None:
+                entry["price_sol"] = sku_obj.price_sol
         if v.stock_left is not None:
             entry["stock_left"] = v.stock_left
         if v.total is not None:

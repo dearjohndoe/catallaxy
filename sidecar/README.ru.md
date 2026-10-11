@@ -2,290 +2,179 @@
 
 > [English version](README.md)
 
-Sidecar оборачивает ваш агент и подключает его к TON Agent Marketplace. Вы пишете бизнес-логику, sidecar берёт на себя остальное: HTTP API, проверку платежей, heartbeat'ы, рефанды.
-
-Один sidecar — один агент. Запустите несколько инстансов с разными .env на разных портах чтобы выставить несколько агентов на маркетплейс.
-
----
-
-## Как это работает
-
-Sidecar запускает ваш агент как subprocess на каждый оплаченный запрос, общаясь через stdin/stdout:
+Сайдкар превращает скрипт в платного агента маркетплейса. Он отвечает по HTTP, проверяет оплату, шлёт heartbeat в реестр и делает возвраты, а скрипт только выполняет работу. Один сайдкар — один агент; чтобы продавать несколько агентов, запустите несколько сайдкаров с разными `.env` и портами.
 
 ```
-Client → POST /invoke → sidecar проверяет платёж → запускает AGENT_COMMAND → возвращает результат
+POST /invoke → 402 → покупатель платит → POST /invoke + proof → проверка платежа → AGENT_COMMAND → результат
 ```
 
----
+## Установка
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e ./sidecar      # появляется команда `sidecar`
+```
+
+Нужен Python ≥ 3.11. Зависимости вашего скрипта ставьте в тот же venv.
 
 ## Контракт агента
 
-Агент читает JSON из **stdin**, делает своё дело, пишет JSON в **stdout**, завершается.
+На каждый вызов сайдкар запускает `AGENT_COMMAND`, пишет JSON в stdin и читает JSON из stdout.
 
-**stdin:**
-```json
-{ "capability": "translate", "body": { "text": "Hello", "target_language": "ru" } }
-```
+| Режим | stdin | stdout |
+|---|---|---|
+| describe (при старте) | `{"mode": "describe"}` | `{"args_schema": {...}, "result_schema": {"type": "string"}}` |
+| execute | `{"capability": "translate", "body": {...}}` | `{"result": {"type": "string", "data": "Привет"}}` |
+| quote (`AGENT_HAS_QUOTE=true`) | `{"mode": "quote", "sku": ..., "body": {...}}` | `{"price": <nanoton>, "plan": "...", "ttl": 300}` |
+| prices (динамические SKU) | `{"mode": "prices"}` | `{"<sku>": {"ton": <nanoton>, "usd": <micro-usdt>}}` |
 
-**stdout:**
-```json
-{ "result": "Привет" }
-```
+- `args_schema` — плоский словарь: `{"text": {"type": "string", "description": "...", "required": true}}`. Типы: `string`, `number`, `integer`, `boolean`, `file`.
+- Типы результата: `string`, `json`, `file`, `url`, `bagid`. У `file` в `data` лежит base64, ещё нужны `mime_type` и `file_name`; сайдкар отдаёт такой файл по `/download/{id}`.
+- Ненулевой код выхода — ошибка, сайдкар возвращает деньги покупателю. Ответ `{"error": "out_of_stock"}` с кодом 0 тоже даёт возврат и помечает SKU закончившимся.
 
-**При ошибке:** завершитесь с ненулевым кодом, запишите сообщение в stderr. Sidecar автоматически вернёт деньги пользователю.
+Рабочие примеры — в [`agents-examples/`](../agents-examples/). Полный контракт — в MCP-ресурсе `catallaxy://spec/agent-contract`.
 
-### Describe mode
+## Настройка
 
-При старте sidecar вызывает агента один раз с `{"mode": "describe"}`, чтобы получить схему аргументов:
+`.env` создают двумя способами: `sidecar scaffold <dir>` (новый агент из шаблона) или `sidecar init --output <file>` (интерактивный мастер). Проверка: `sidecar doctor --env-file <file>`.
 
-```json
-{
-  "args_schema": {
-    "text":            { "type": "string",  "description": "Текст для перевода", "required": true },
-    "target_language": { "type": "string",  "description": "Целевой язык",       "required": true }
-  }
-}
-```
+Минимум для TON-агента:
 
-Типы полей: `"string"` | `"number"` | `"boolean"` | `"file"`. Используется для валидации запросов и UI маркетплейса. Необязательно — можно не реализовывать.
-
-Рабочие примеры обертки агентов в `agents-examples/` обязательны к просмотру.
-
----
-
-## Быстрый старт (рекомендуется)
-
-**1. Установите sidecar как CLI-инструмент:**
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -e ./sidecar
-```
-
-**2. Создайте каркас агента (директория + `agent.py` + мастер `.env`):**
-```bash
-.venv/bin/sidecar scaffold my-agent --capability translate
-cd my-agent
-# отредактируйте agent.py — только бизнес-логику
-```
-
-**3. Установите как systemd-сервис:**
-```bash
-sudo .venv/bin/sidecar service --name my-agent install --env-file my-agent/.env
-```
-
-Готово. Сервис запущен и автоматически стартует при ребуте.
-
----
-
-## Ручная настройка
-
-**1. Создайте venv и установите зависимости:**
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -e ./sidecar
-.venv/bin/pip install -r agents-examples/translator/requirements.txt  # или зависимости вашего агента
-```
-
-**2. Создайте `.env` через мастер:**
-```bash
-.venv/bin/sidecar init --output my-agent/.env
-```
-
-Или создайте `.env` вручную:
 ```env
 AGENT_COMMAND=python agent.py
-AGENT_CAPABILITY=translate
-AGENT_NAME=My Translator
-AGENT_DESCRIPTION=Translates text to any language
-AGENT_SKUS=default:infinite:ton=10000000:usd=1000000   # см. раздел «SKU» ниже
-AGENT_ENDPOINT=https://my-agent.example.com # ip или домен сервера с запущенным sidecar
-AGENT_WALLET_PK=<приватный ключ>
+AGENT_CAPABILITY=translate                 # список через запятую, первый — основной
+AGENT_NAME=My Translator                   # из него же имена локальных БД; на хосте должно быть уникальным
+AGENT_DESCRIPTION=Translates text
+AGENT_ENDPOINT=https://my-agent.example.com
+AGENT_SKUS=default:infinite:ton=10000000:usd=1000000
+TON_WALLET_PK=<private key>                # алиас: AGENT_WALLET_PK
+```
 
-# Опционально
-PORT=8080 # порт на котором sidecar будет слушать HTTP запросы
-TESTNET=false
-# TON_REGISTRY_ADDRESS=   # mailbox; голый REGISTRY_ADDRESS сайдкар игнорирует
-# Только testnet, фейковый USDT (на мейннете не задавать — останется Tether):
-# TON_USDT_MASTER=
-# TON_JETTON_WALLET_CODE=
-AGENT_SYNC_TIMEOUT=30       # секунды до переключения в async режим
-AGENT_FINAL_TIMEOUT=1200    # максимальное время для async задач
+Минимум для агента только на Solana (TON-ключ не нужен):
 
-# Опционально — картинки для витрины
-AGENT_PREVIEW_URL=https://my-agent.example.com/images/preview.png
-AGENT_AVATAR_URL=https://my-agent.example.com/images/avatar.png
-AGENT_IMAGES=https://my-agent.example.com/images/1.png,https://my-agent.example.com/images/2.png
-IMAGES_DIR=images           # локальная папка, отдаётся по GET /images/{file}
-
-# Опционально — кошелёк владельца (публикуется в heartbeat)
-OWNER_WALLET=EQowner...
-
-# Опционально — Telegram-бот владельца (уведомления о платежах/рефандах).
-# Либо обе переменные заданы, либо обе пустые — иначе sidecar не стартует.
-# TG_BOT_TOKEN     — токен из @BotFather, бот уникален для ЭТОГО агента
-# TG_USER_ID_LIST  — whitelist Telegram user_id (через запятую); уведомления
-#                    шлются на каждый id, сообщения от чужих игнорируются
-TG_BOT_TOKEN=1234:ABC...
-TG_USER_ID_LIST=123456789,987654321
+```env
+AGENT_SKUS=default:infinite:sol=2000000:usdc=1000000
+SOL_WALLET_PK=[12,34,...]                  # keypair: JSON-массив или base58
+SOL_RPC_URL=https://mainnet.helius-rpc.com/?api-key=...
 ```
 
 ### SKU
 
-`AGENT_SKUS` описывает, что продаёт агент. Один агент = одна capability, но
-у него может быть N SKU с разными ценами и остатками. Фронт рендерит
-селектор SKU; поле `sku` принимают `/info`, `/quote` и `/invoke`.
+`AGENT_SKUS=sku_id:stock:<цены>[,...]`
 
-Формат: `sku_id:stock:<price_spec>[, ...]`, где `<price_spec>` — любая
-комбинация `ton=<nanotons>` и/или `usd=<micro-usdt>` через `:`. Минимум
-один рейл обязателен, и **все SKU должны поддерживать один и тот же набор
-рейлов** (смешивать TON-only и USDT-only — ошибка старта).
+- `stock` — число (остаток, уменьшается с каждой продажей) или `infinite`.
+- `<цены>` — одна или несколько через `:`: `ton=<nanoton>`, `usd=<micro-USDT>`, `sol=<lamports>`, `usdc=<micro-USDC>`. Для бесплатного SKU — `free`.
+- Все платные SKU должны принимать один и тот же набор рейлов.
+- `ton=dynamic` / `usd=dynamic` (или `=0`) — цену в момент запроса даёт режим `prices` у агента.
+- `AGENT_SKU_TITLES=basic=Basic,premium=Premium` — названия для витрины.
 
 ```env
-# Один SKU (типичный случай)
-AGENT_SKUS=default:infinite:ton=10000000:usd=1000000
-
-# Несколько SKU с остатками и названиями
 AGENT_SKUS=basic:10:ton=1000000000:usd=1500000,premium:3:ton=5000000000:usd=7000000
-AGENT_SKU_TITLES=basic=Базовый аккаунт,premium=Премиум lvl 50
+AGENT_SKUS=trial:1:free,month:infinite:ton=5000000000:usd=5000000
 ```
 
-Stock: число — начальный запас (декрементится при продаже); `infinite`
-(или пустое значение) — без учёта остатков.
+Бесплатный SKU вызывается без оплаты. Агент получает `FREE=1` и `PAYMENT_RAIL=FREE`, а в `CALLER_ADDRESS` — IP клиента. Ограничений два:
+- `FREE_CLAIM_LIMIT` получений (по умолчанию 1) с одного IP за `FREE_CLAIM_WINDOW_SECONDS` (по умолчанию 30 дней); сверх лимита — `403 free_limit_reached`;
+- `stock` SKU как общий лимит на всех; когда кончился — `409 out_of_stock`.
 
-Динамическая цена: укажите `ton=0` и/или `usd=0` — sidecar вызовет агента
-в `mode=prices` и получит актуальную цену в момент запроса (для SKU, чья
-цена зависит от внешнего состояния).
+Остатки: `sidecar stock --env-file <file> show | set <sku> <total> | add <sku> <delta>`.
 
-**Legacy fallback:** если `AGENT_SKUS` не задан, sidecar синтезирует один
-`default` SKU из `AGENT_PRICE` (nanoTON) и/или `AGENT_PRICE_USD`
-(micro-USDT) и опционального `AGENT_STOCK`. Новым агентам рекомендуется
-сразу использовать `AGENT_SKUS` — `AGENT_PRICE`/`AGENT_PRICE_USD`
-оставлены только для обратной совместимости.
+### Остальные переменные
 
-### Файлы состояния и данных
-
-Sidecar держит три локальных файла. Чтобы много сайдкаров на одном хосте
-не коллизились, обе БД **авто-неймспейсятся по slug'у из `AGENT_NAME`**
-(filesystem-safe) и **не** настраиваются через env:
-
-| Файл | Путь | Настраивается |
+| Переменная | По умолчанию | Назначение |
 |---|---|---|
-| Состояние (sidecar_id и т.п.) | `.sidecar_state.<slug>.json` | `SIDECAR_STATE_PATH` (опц. override) |
-| Обработанные TX + очередь рефандов | `processed_txs.<slug>.db` | Нет — из `AGENT_NAME` |
-| Остатки (stock) | `stock.<slug>.db` | Нет — из `AGENT_NAME` |
+| `PORT` | `8080` | HTTP-порт |
+| `TESTNET` | `false` | тестнет TON |
+| `AGENT_SYNC_TIMEOUT` | `30` | через сколько секунд ответ переходит в асинхронный `job_id` |
+| `AGENT_FINAL_TIMEOUT` | `1200` | максимальное время одного вызова |
+| `PAYMENT_TIMEOUT` | `300` | сколько платёж можно предъявить |
+| `AGENT_HAS_QUOTE` | `false` | включает `POST /quote` и режим `quote` у агента |
+| `REFUND_FEE_NANOTON` | `500000` | удерживается из TON-возврата |
+| `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` | `120` / `60` | лимит запросов с одного IP |
+| `TRUSTED_PROXY_IPS` | — | от каких адресов верить `X-Forwarded-For` |
+| `OWNER_WALLET` | — | кошелёк продавца в heartbeat |
+| `AGENT_PREVIEW_URL`, `AGENT_AVATAR_URL`, `AGENT_IMAGES` | — | картинки витрины (http/https, без SVG, в `AGENT_IMAGES` до 5) |
+| `IMAGES_DIR` | `images` | папка, которая отдаётся по `GET /images/{name}` |
+| `TG_BOT_TOKEN` + `TG_USER_ID_LIST` | — | Telegram-бот владельца: уведомления об оплатах и возвратах (задавать обе или ни одной) |
+| `MONITOR_SERVICE_URL` | — | внешний монитор TON-транзакций (tonapi-relay) вместо опроса сети |
+| `TON_REGISTRY_ADDRESS` | официальный | другой TON-реестр (для e2e) |
 
-`SIDECAR_TX_DB_PATH` / `SIDECAR_STOCK_DB_PATH` не существуют — задавать их
-бесполезно. Изоляция между агентами — за счёт разного `AGENT_NAME` (давайте
-каждому агенту уникальное имя; уникальные `sku_id` тоже желательны). Через
-env можно переопределить только путь к файлу состояния, и его дефолт уже
-per-agent.
+### Solana (SOL, USDC)
 
-### Картинки
+| Переменная | По умолчанию | Назначение |
+|---|---|---|
+| `SOL_WALLET_PK` | — | ключ агента; нужен для SOL и USDC |
+| `SOL_CLUSTER` | `mainnet` | или `devnet` |
+| `SOL_RPC_URL` | публичный RPC | ставьте RPC с ключом: публичный под нагрузкой отвечает 429 |
+| `SOL_REGISTRY_ADDRESS` | devnet: встроенный; mainnet: нет | Solana-реестр; без него heartbeat в Solana не идёт |
+| `SOL_COMMITMENT` | `confirmed` | или `finalized` |
+| `SOL_REFUND_FEE_LAMPORTS` | `5000` | удерживается из SOL-возврата |
+| `SOL_USDC_REFUND_FEE` | `5000` | micro-USDC, удерживается из USDC-возврата |
+| `SOL_USDC_REFUND_ATA_FEE` | `200000` | удерживается сверху, если USDC-счёт покупателя приходится создавать заново |
+| `SOL_USDC_SOURCE_COOLDOWN_SEC` | `60` | пауза для USDC-счёта покупателя после неудачного settle |
+| `SOL_USDC_IP_MAX_FAILED_SETTLES` / `SOL_USDC_IP_FAILURE_WINDOW_SEC` | `5` / `600` | лимит неудачных settle с одного IP (`0` — выкл.) |
 
-Положите файлы в `IMAGES_DIR` (по умолчанию `./images/`) — они отдаются
-агентом по `GET /images/{name}`. В `AGENT_PREVIEW_URL` / `AGENT_AVATAR_URL`
-/ `AGENT_IMAGES` укажите эти URL (или любой публичный HTTP/HTTPS хост) —
-они попадут в heartbeat.
+- **RPC.** Агент в простое делает около 0.26M запросов в месяц: раз в 10 с опрашивает подписи SOL. У агента только с USDC вместо этого раз в 15 с идёт проба `getHealth`, это ~0.18M. Бесплатного RPC с ключом хватает (Helius Free — 1M кредитов).
+- **USDC работает через x402, и сетевую комиссию платит агент.** Поэтому он отклоняет транзакции, у которых лимит вычислений выше 60 000 или priority fee выше 30 000 lamports. SOL агент теряет только на транзакции, упавшей в сети; плохую транзакцию бесплатно отсекает симуляция. Чтобы покупатель не мог устроить гонку платежей с одного счёта, у агента три ограничения. Все отвечают 429 с `Retry-After`:
+  - с одного счёта покупателя проводится один settle за раз (`settle_in_progress`);
+  - после падения в сети счёт ставится на паузу (`source_cooldown`);
+  - число падений с одного IP ограничено (`too_many_failed_settlements`).
+- **Heartbeat** стоит 0.00014 SOL в неделю (перевод плюс Memo `CTLX:REG:<json>`). Агент с обоими ключами шлёт heartbeat в оба реестра.
 
-Ограничения (валидируются перед отправкой heartbeat):
+### Баланс на газ
 
-- Только схемы `http://` и `https://`
-- SVG заблокирован (риск inline-скрипта); используйте PNG, JPEG, GIF или WebP
-- Каждый URL ≤ 512 символов; `AGENT_IMAGES` — максимум 5 штук
-- Общий payload heartbeat ≤ 2 KB — иначе media-поля выкидываются с warning
-
-Локальный `/images/`-роут применяет тот же MIME-whitelist и блокирует
-path-traversal и симлинк-побеги.
-
-> **USDT-агенты должны поддерживать баланс TON на кошельке.**
-> Даже если агент принимает только USDT, для рефанда нужно отправить джеттон-перевод — это стоит ~0.06 TON газа из TON-баланса кошелька агента.
-> Держите на кошельке агента минимум **0.5–1 TON** и периодически пополняйте — иначе рефанды будут молча падать, а ваш рейтинг быстро улетит в 0.
-
-**3. Проверьте конфигурацию:**
-```bash
-.venv/bin/sidecar doctor --env-file my-agent/.env
-```
-
----
+Возвраты и heartbeat оплачиваются с кошелька агента:
+- USDT-возврат стоит ~0.06 TON — держите на кошельке 0.5–1 TON, даже если продаёте только за USDT;
+- TON-heartbeat стоит 0.01 TON в неделю;
+- на Solana держите немного SOL: каждый возврат платит комиссию 5000 lamports. USDC-возврат на закрытый счёт ещё платит его rent (~0.0015 SOL); это покрывает `SOL_USDC_REFUND_ATA_FEE`.
 
 ## Запуск
 
-**Разово / режим разработки:**
 ```bash
-.venv/bin/sidecar run --env-file agents-examples/translator/.env
+.venv/bin/sidecar run --env-file my-agent/.env                 # в терминале
+sudo .venv/bin/sidecar service install --name my-agent --env-file my-agent/.env
 ```
 
-**Тестнет:**
-```bash
-TESTNET=true .venv/bin/sidecar run --env-file .env
-```
-
-**Как systemd сервис (продакшн):**
-```bash
-sudo .venv/bin/sidecar service install \
-  --name my-agent \
-  --workdir /path/to/project \
-  --env-file /path/to/agent/.env
-```
-
-Имя сервиса в systemd будет `my-agent-ctlx-agent.service`. Стартует сразу и автоматически перезапускается при ребуте.
-
----
-
-## Управление сервисом
-
-Если установлен только один агент, `--name` можно не указывать — он определяется автоматически.
+`service install` создаёт systemd-юнит `my-agent-ctlx-agent.service`, включает и запускает его. Управлять юнитом — только через CLI (если агент один, `--name` можно не указывать):
 
 ```bash
-# Статус
-.venv/bin/sidecar service status --name my-agent
-
-# Логи (в реальном времени)
+.venv/bin/sidecar service status|start|stop --name my-agent
+.venv/bin/sidecar service restart --name my-agent --env-file my-agent/.env
 .venv/bin/sidecar service logs --name my-agent -f
-
-# Логи (последние 100 строк)
-.venv/bin/sidecar service logs --name my-agent --lines 100
-
-# Рестарт / остановка
-.venv/bin/sidecar service restart --name my-agent
-.venv/bin/sidecar service stop --name my-agent
-
-# Удалить сервис
 sudo .venv/bin/sidecar service uninstall --name my-agent
 ```
 
-> Если агент не отправляет heartbeat более 7 дней — он исчезает из маркетплейса.
+## Локальные файлы
 
----
+Имена файлов берутся из `AGENT_NAME`, так что в одном каталоге могут жить несколько агентов:
+
+| Файл | Что внутри |
+|---|---|
+| `.sidecar_state.<slug>.json` | `sidecar_id`, время последних heartbeat (путь: `SIDECAR_STATE_PATH`) |
+| `processed_txs.<slug>.db` | использованные платежи, очередь возвратов |
+| `stock.<slug>.db` | остатки |
+
+На работающем агенте их не удалять: там защита от повторного использования платежа и неотправленные возвраты.
+
+## HTTP API
+
+| Метод | Путь | Назначение |
+|---|---|---|
+| `GET` | `/info` | имя, SKU, цены по рейлам, схемы, состояние рейлов |
+| `POST` | `/quote` | цена под конкретные аргументы (если `AGENT_HAS_QUOTE`) |
+| `POST` | `/invoke` | вызов: без оплаты → `402`, с доказательством оплаты → результат или `job_id` |
+| `GET` | `/result/{job_id}` | результат асинхронного вызова |
+| `GET` | `/download/{file_id}` | файл из результата типа `file` |
+| `GET` | `/images/{name}` | картинки из `IMAGES_DIR` |
+
+Форматы запросов и ответов — в [`CONTRACTS.md`](../CONTRACTS.md).
 
 ## Тесты
 
 ```bash
-# Установите тестовые зависимости
-.venv/bin/pip install pytest pytest-asyncio pytest-cov
-
-# Запуск тестов (из директории sidecar/)
 cd sidecar
-../.venv/bin/python -m pytest tests -v
-
-# Запуск с отчётом по покрытию
-../.venv/bin/python -m pytest tests --cov=. --cov-report=term-missing
+../.venv/bin/pip install pytest pytest-asyncio
+../.venv/bin/python -m pytest -q
 ```
 
-Тесты также запускаются автоматически на каждый PR и push в master через GitHub Actions.
-
----
-
-## HTTP API
-
-| Метод | Путь | Описание |
-|-------|------|----------|
-| `GET` | `/info` | Метаданные агента, цена, схема |
-| `POST` | `/invoke` | Вызов агента (требует оплаты TON) |
-| `GET` | `/result/{job_id}` | Результат async задачи |
-
----
-
-## MCP Server
-
-Всё вышеперечисленное — поиск, вызов, деплой и управление сервисами — также доступно через [MCP-сервер](../mcp/). Подключите его к Claude, GPT или любой LLM, и они смогут управлять агентами автономно, без браузера и ручных HTTP-запросов. Подробнее в [`mcp/README.ru.md`](../mcp/README.ru.md).
+Эти же тесты гоняются в CI на каждый PR. Прогоны на devnet с настоящими Solana-транзакциями — в [`experiments/devnet/`](experiments/devnet/).

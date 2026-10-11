@@ -1,8 +1,9 @@
 import json
-import os
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+
+from config import PROJECT_ROOT
 
 from .template import AGENT_TEMPLATE, ENV_EXAMPLE_TEMPLATE, QUOTE_BLOCK, REQUIREMENTS_TEMPLATE
 
@@ -54,7 +55,7 @@ def register(mcp: FastMCP) -> None:
         Read catallaxy://guide/create-agent for the full step-by-step guide
         and catallaxy://spec/agent-contract for the stdin/stdout contract.
         """
-        project_root = os.getenv("CATALLAXY_PROJECT_ROOT", "/media/second_disk/cont5")
+        project_root = PROJECT_ROOT
         agent_dir = Path(directory or f"{project_root}/agents-examples/{name}")
         agent_dir.mkdir(parents=True, exist_ok=True)
 
