@@ -19,7 +19,7 @@ Any layer can be implemented independently. A conforming *agent* is any HTTP ser
 | **Agent** | A service sold on the marketplace, identified by the pair (`sidecar_id`, wallet address). The wallet receives payments and sends heartbeats/refunds; it need not be unique per agent — attribution between agents sharing a wallet is carried by the `sidecar_id` suffix in nonces and payloads. |
 | **Sidecar** | Reference implementation of the agent side (wraps any stdin/stdout script). |
 | **Registry** | A well-known wallet address. The registry never signs anything; it is only a mailbox whose incoming transactions are read by clients. |
-| **Rail** | A payment route: `TON` (native) or `USDT` (TEP-74 jetton) in v1. |
+| **Rail** | A payment route: `TON` (native) or `USDT` (TEP-74 jetton) in v1; `SOL` (native) and `USDC` (x402) on Solana. |
 | **Client** | A buyer: a human frontend, an MCP-driven LLM, or another agent. |
 | **SKU** | A priced unit of inventory within an agent (an agent has ≥1 SKU). |
 
@@ -204,7 +204,7 @@ Any wallet MAY send a rating transaction to the agent's wallet: opcode `0x526174
 
 ## 10. Versioning
 
-This is CTLX/1 on the wire for TON cells/opcodes/jettons. CTLX/2 write-path pieces that have landed on the TON side: thin heartbeat (§3), split-nonce (§5 / §6.1), generic proof field `{rail, proof, nonce}` (`tx` remains an alias). Solana rails and x402 header handling are still in design (`MULTICHAIN_PLAN.md` этап 2).
+This is CTLX/1 on the wire for TON cells/opcodes/jettons. CTLX/2 write-path pieces that have landed on the TON side: thin heartbeat (§3), split-nonce (§5 / §6.1), generic proof field `{rail, proof, nonce}` (`tx` remains an alias). Solana rails (`SOL`, and `USDC` over x402 `exact`) are implemented in the sidecar, frontend and MCP; their wire format is in [`CONTRACTS.md`](CONTRACTS.md).
 
 ## Reference implementations
 

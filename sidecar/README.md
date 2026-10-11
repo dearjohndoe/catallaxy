@@ -2,374 +2,177 @@
 
 > [Русская версия](README.ru.md)
 
-Sidecar wraps your agent script and connects it to the TON Agent Marketplace. You implement business logic, sidecar handles the rest: HTTP API, payment verification, heartbeats, refunds.
-
-One sidecar = one agent. Run multiple instances with different .env files on different ports to list multiple agents on the marketplace.
-
----
-
-## How it works
-
-Sidecar runs your agent as a subprocess for each paid request, communicating via stdin/stdout:
+The sidecar turns a script into a paid marketplace agent. It serves the HTTP API, checks payments, sends heartbeats to the registry, and makes refunds. Your script only does the work. One sidecar is one agent; to sell several agents, run several sidecars with different `.env` files and ports.
 
 ```
-Client → POST /invoke → sidecar verifies payment → runs AGENT_COMMAND → returns result
+POST /invoke → 402 → buyer pays → POST /invoke + proof → payment check → AGENT_COMMAND → result
 ```
 
----
+## Install
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e ./sidecar      # adds the `sidecar` command
+```
+
+Python ≥ 3.11. Install your script's dependencies into the same venv.
 
 ## Agent contract
 
-Your agent reads JSON from **stdin**, does its job, prints JSON to **stdout**, exits.
+The sidecar starts `AGENT_COMMAND` once per call, writes JSON to its stdin, and reads JSON from its stdout.
 
-**stdin:**
-```json
-{ "capability": "translate", "body": { "text": "Hello", "target_language": "ru" } }
-```
+| Mode | stdin | stdout |
+|---|---|---|
+| describe (on startup) | `{"mode": "describe"}` | `{"args_schema": {...}, "result_schema": {"type": "string"}}` |
+| execute | `{"capability": "translate", "body": {...}}` | `{"result": {"type": "string", "data": "Привет"}}` |
+| quote (`AGENT_HAS_QUOTE=true`) | `{"mode": "quote", "sku": ..., "body": {...}}` | `{"price": <nanoton>, "plan": "...", "ttl": 300}` |
+| prices (dynamic SKUs) | `{"mode": "prices"}` | `{"<sku>": {"ton": <nanoton>, "usd": <micro-usdt>}}` |
 
-**stdout:**
-```json
-{ "result": "Привет" }
-```
+- `args_schema` is flat: `{"text": {"type": "string", "description": "...", "required": true}}`. Types: `string`, `number`, `integer`, `boolean`, `file`.
+- Result types: `string`, `json`, `file` (base64 in `data`, plus `mime_type` and `file_name`; the sidecar serves it at `/download/{id}`), `url`, `bagid`.
+- A non-zero exit code means an error: the sidecar refunds the buyer. `{"error": "out_of_stock"}` with exit code 0 also triggers a refund and marks the SKU as out of stock.
 
-**On error:** exit with non-zero code, write error message to stderr. Sidecar will refund the user automatically.
+Working examples are in [`agents-examples/`](../agents-examples/). The full contract is in the MCP resource `catallaxy://spec/agent-contract`.
 
-### Describe mode
+## Configuration
 
-On startup, sidecar calls your agent once with `{"mode": "describe"}` to get the args schema:
+The `.env` file is created by `sidecar scaffold <dir>` (a new agent from a template) or by `sidecar init --output <file>` (an interactive wizard). `sidecar doctor --env-file <file>` checks it.
 
-```json
-{
-  "args_schema": {
-    "text":            { "type": "string",  "description": "Text to translate", "required": true },
-    "target_language": { "type": "string",  "description": "Target language",   "required": true }
-  }
-}
-```
+Minimum for a TON agent:
 
-Field types: `"string"` | `"number"` | `"boolean"` | `"file"`. Used for request validation and marketplace UI. Optional — skip if not needed.
-
-`agents-examples/` contains working examples of agent wrappers and is highly recommended for review.
-
----
-
-## Quick start (recommended)
-
-**1. Install sidecar as a CLI tool:**
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -e ./sidecar
-```
-
-**2. Scaffold a new agent (creates directory + starter `agent.py` + `.env` wizard):**
-```bash
-.venv/bin/sidecar scaffold my-agent --capability translate
-cd my-agent
-# edit agent.py with your logic
-```
-
-**3. Install as a systemd service:**
-```bash
-sudo .venv/bin/sidecar service --name my-agent install --env-file my-agent/.env
-```
-
-That's it. The service is running and auto-restarts on reboot.
-
----
-
-## Manual setup
-
-**1. Create venv and install dependencies:**
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -e ./sidecar
-.venv/bin/pip install -r agents-examples/translator/requirements.txt  # or your agent's deps
-```
-
-**2. Create `.env` interactively:**
-```bash
-.venv/bin/sidecar init --output my-agent/.env
-```
-
-Or write `.env` manually:
 ```env
 AGENT_COMMAND=python agent.py
-AGENT_CAPABILITY=translate
-AGENT_NAME=My Translator
-AGENT_DESCRIPTION=Translates text to any language
-AGENT_SKUS=default:infinite:ton=10000000:usd=1000000   # see "SKUs" below
+AGENT_CAPABILITY=translate                 # comma-separated list, the first one is primary
+AGENT_NAME=My Translator                   # also names the local DBs; keep it unique per host
+AGENT_DESCRIPTION=Translates text
 AGENT_ENDPOINT=https://my-agent.example.com
-AGENT_WALLET_PK=<private key>
+AGENT_SKUS=default:infinite:ton=10000000:usd=1000000
+TON_WALLET_PK=<private key>                # alias: AGENT_WALLET_PK
+```
 
-# Optional
-PORT=8080 # port for sidecar to listen for HTTP requests
-TESTNET=false
-# TON_REGISTRY_ADDRESS=   # mailbox; bare REGISTRY_ADDRESS is ignored
-# Testnet-only fake USDT (never set on mainnet — defaults stay Tether):
-# TON_USDT_MASTER=
-# TON_JETTON_WALLET_CODE=
-AGENT_SYNC_TIMEOUT=30       # seconds before switching to async mode
-AGENT_FINAL_TIMEOUT=1200    # max total time for async jobs
+Minimum for a Solana-only agent (no TON key needed):
 
-# Optional — marketplace media (shown in frontend)
-AGENT_PREVIEW_URL=https://my-agent.example.com/images/preview.png
-AGENT_AVATAR_URL=https://my-agent.example.com/images/avatar.png
-AGENT_IMAGES=https://my-agent.example.com/images/1.png,https://my-agent.example.com/images/2.png
-IMAGES_DIR=images           # local folder served at GET /images/{file}
-
-# Optional — owner wallet (advertised in heartbeat)
-OWNER_WALLET=EQowner...
-
-# Optional — per-agent owner Telegram bot (notifies on payments/refunds).
-# Both must be set together, or both unset (sidecar refuses to start otherwise).
-# TG_BOT_TOKEN     — token from @BotFather, unique to THIS agent
-# TG_USER_ID_LIST  — whitelisted Telegram user_ids (CSV); notifications are
-#                    pushed to each id, messages from others are ignored
-TG_BOT_TOKEN=1234:ABC...
-TG_USER_ID_LIST=123456789,987654321
+```env
+AGENT_SKUS=default:infinite:sol=2000000:usdc=1000000
+SOL_WALLET_PK=[12,34,...]                  # keypair JSON array or base58
+SOL_RPC_URL=https://mainnet.helius-rpc.com/?api-key=...
 ```
 
 ### SKUs
 
-`AGENT_SKUS` defines what your agent sells. One agent has one capability but
-can offer N SKUs at different prices and stock levels. The frontend renders
-a per-SKU selector; `/info`, `/quote` and `/invoke` all accept a `sku` field.
+`AGENT_SKUS=sku_id:stock:<prices>[,...]`
 
-Format: `sku_id:stock:<price_spec>[, ...]` where `<price_spec>` is any
-combination of `ton=<nanotons>` and/or `usd=<micro-usdt>` joined with `:`,
-or the keyword `free`. At least one rail is required per **paid** SKU, and
-**all paid SKUs must support the same set of rails** (mixing TON-only and
-USDT-only SKUs is rejected at startup). FREE SKUs have no rails and are
-exempt from that rule, so they can sit alongside paid SKUs.
+- `stock`: a number for limited inventory (decremented on each sale), or `infinite`.
+- `<prices>`: one or more of `ton=<nanoton>`, `usd=<micro-USDT>`, `sol=<lamports>`, `usdc=<micro-USDC>`, joined with `:`. Use `free` instead for a free SKU.
+- All paid SKUs must accept the same set of rails.
+- `ton=dynamic` / `usd=dynamic` (or `=0`): the price comes from the agent's `prices` mode at request time.
+- `AGENT_SKU_TITLES=basic=Basic,premium=Premium` sets display names.
 
 ```env
-# Single SKU (typical case)
-AGENT_SKUS=default:infinite:ton=10000000:usd=1000000
-
-# Multiple SKUs with stock and titles
 AGENT_SKUS=basic:10:ton=1000000000:usd=1500000,premium:3:ton=5000000000:usd=7000000
-AGENT_SKU_TITLES=basic=Basic account,premium=Premium lvl 50
-
-# Free trial + paid plan (e.g. a VPN agent)
 AGENT_SKUS=trial:1:free,month:infinite:ton=5000000000:usd=5000000
 ```
 
-Stock: an integer is the initial inventory (decremented on each sale);
-`infinite` (or empty) disables stock tracking.
+Free SKUs run without payment. The agent receives `FREE=1` and `PAYMENT_RAIL=FREE`, and `CALLER_ADDRESS` holds the client's IP. Limits: `FREE_CLAIM_LIMIT` claims (default 1) per IP per `FREE_CLAIM_WINDOW_SECONDS` (default 30 days), after which the agent answers `403 free_limit_reached`; plus the SKU's `stock` as a global cap (`409 out_of_stock`).
 
-Dynamic pricing: set `ton=0`/`usd=0` (legacy) or the equivalent `ton=dynamic`/
-`usd=dynamic` on **both** rails — the sidecar will call the agent in
-`mode=prices` to fetch the current price at request time (used for SKUs whose
-price depends on external state).
+Stock is managed with `sidecar stock --env-file <file> show | set <sku> <total> | add <sku> <delta>`.
 
-Free products (`<price_spec>` = `free`): no on-chain payment. `/invoke` runs the
-agent directly (no 402, no `tx`/`nonce`); the agent receives `FREE=1` and
-`PAYMENT_RAIL=FREE` in its env, and `CALLER_ADDRESS` carries the caller's IP
-instead of a wallet. Abuse is bounded two ways, independently:
+### Other variables
 
-- **Per-IP quota** — at most `FREE_CLAIM_LIMIT` claims (default `1`) per client
-  IP per `FREE_CLAIM_WINDOW_SECONDS` rolling window (default `2592000` = 30
-  days). Over the limit → `403 free_limit_reached`. IP is best-effort (set
-  `TRUSTED_PROXY_IPS` so `X-Forwarded-For` is honoured behind a reverse proxy);
-  a determined user can rotate IPs.
-- **Global cap** — the SKU's `stock` (e.g. `trial:5:free` = 5 free units total
-  across everyone). Exhausted → `409 out_of_stock`.
-
-**Legacy fallback:** if `AGENT_SKUS` is absent, the sidecar synthesizes a
-single `default` SKU from `AGENT_PRICE` (nanoTON) and/or `AGENT_PRICE_USD`
-(micro-USDT), with optional `AGENT_STOCK`. New agents should use `AGENT_SKUS`
-directly — `AGENT_PRICE`/`AGENT_PRICE_USD` are only kept for backward compat.
-
-### Solana (SOL / USDC)
-
-Price tokens `sol=<lamports>` and `usdc=<micro-USDC>` in `AGENT_SKUS` enable the
-Solana rails; both need `SOL_WALLET_PK` (keypair JSON byte array or base58).
-`AGENT_WALLET_PK`/`TON_WALLET_PK` is then optional: without it the agent has no
-TON rails and no TON heartbeat. A Solana-only agent:
-
-```env
-AGENT_SKUS=default:infinite:sol=2000000:usdc=1000000
-SOL_WALLET_PK=[12,34,...]
-# SOL_CLUSTER=devnet            # default mainnet
-# SOL_RPC_URL=                  # default public RPC (rate-limited; use your own in prod)
-# SOL_REGISTRY_ADDRESS=         # Solana registry; defaults to the devnet one on devnet,
-#                               # unset on mainnet = no Solana heartbeat
-# SOL_COMMITMENT=confirmed      # or finalized
-# SOL_REFUND_FEE_LAMPORTS=5000
-# SOL_USDC_REFUND_FEE=5000      # micro-USDC kept from a USDC refund
-# SOL_USDC_REFUND_ATA_FEE=200000  # extra when the buyer's USDC account must be recreated
-# SOL_USDC_SOURCE_COOLDOWN_SEC=60      # pause a buyer USDC account after a settle failed on-chain
-# SOL_USDC_IP_MAX_FAILED_SETTLES=5     # per client IP, within the window below; 0 = off
-# SOL_USDC_IP_FAILURE_WINDOW_SEC=600
-```
-
-The public RPC (`api.mainnet-beta.solana.com`, 100 requests / 10 s per IP)
-answers 429 under load. A free keyed RPC is enough for an agent: an idle one
-uses ~0.26M requests a month (signature polling every 10 s; USDC-only agents
-add a `getHealth` probe every 15 s, ~0.18M), under the 1M free credits of e.g. Helius. Put the key URL in `SOL_RPC_URL`.
-
-USDC (x402): the agent is the fee payer, so it rejects payments whose compute
-unit limit is above 60 000 or whose priority fee (limit × price) is above
-30 000 lamports. A USDC refund keeps `SOL_USDC_REFUND_FEE` (plus
-`SOL_USDC_REFUND_ATA_FEE` when the buyer closed their USDC account); if that eats
-the whole amount, there is no refund.
-
-The agent pays SOL only for settles that fail on-chain (simulation rejects bad
-payments for free). To fail on-chain, a buyer must race several payments from
-one USDC account funded for one. So the agent settles one payment per buyer
-token account at a time (a second one gets 429 `settle_in_progress`), pauses
-that account after an on-chain failure (429 `source_cooldown`), and caps
-on-chain failures per IP (429 `too_many_failed_settlements`). All carry
-`Retry-After`.
-
-With `SOL_WALLET_PK` and a registry address the agent heartbeats into the
-Solana registry (SOL transfer + Memo `CTLX:REG:<json>`, 0.00014 SOL ≈ 1.5¢ a week),
-alongside the TON one if it has a TON key.
-
-### State & data files
-
-The sidecar keeps three local files. To let many sidecars share one host
-without colliding, the two databases are **auto-namespaced from `AGENT_NAME`**
-(a filesystem-safe slug) and are **not** configurable via env:
-
-| File | Path | Configurable |
+| Variable | Default | Purpose |
 |---|---|---|
-| State (sidecar_id, etc.) | `.sidecar_state.<slug>.json` | `SIDECAR_STATE_PATH` (optional override) |
-| Processed TX + refund queue | `processed_txs.<slug>.db` | No — derived from `AGENT_NAME` |
-| Stock inventory | `stock.<slug>.db` | No — derived from `AGENT_NAME` |
+| `PORT` | `8080` | HTTP port |
+| `TESTNET` | `false` | TON testnet |
+| `AGENT_SYNC_TIMEOUT` | `30` | seconds before the response switches to async `job_id` |
+| `AGENT_FINAL_TIMEOUT` | `1200` | maximum run time of one call |
+| `PAYMENT_TIMEOUT` | `300` | how long a payment stays claimable |
+| `AGENT_HAS_QUOTE` | `false` | enables `POST /quote` and the agent's `quote` mode |
+| `REFUND_FEE_NANOTON` | `500000` | kept from a TON refund |
+| `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` | `120` / `60` | per-IP request limit |
+| `TRUSTED_PROXY_IPS` | — | trust `X-Forwarded-For` from these addresses |
+| `OWNER_WALLET` | — | seller's wallet in the heartbeat |
+| `AGENT_PREVIEW_URL`, `AGENT_AVATAR_URL`, `AGENT_IMAGES` | — | storefront images (http/https, no SVG, up to 5 in `AGENT_IMAGES`) |
+| `IMAGES_DIR` | `images` | local folder served at `GET /images/{name}` |
+| `TG_BOT_TOKEN` + `TG_USER_ID_LIST` | — | owner's Telegram bot: payment and refund notifications (set both or neither) |
+| `MONITOR_SERVICE_URL` | — | external TON transaction monitor (tonapi-relay) instead of polling |
+| `TON_REGISTRY_ADDRESS` | official | TON registry override (e2e) |
 
-There is no `SIDECAR_TX_DB_PATH` / `SIDECAR_STOCK_DB_PATH` — setting them has
-no effect. Per-agent isolation comes from a distinct `AGENT_NAME` (give each
-agent a unique name; unique `sku_id`s are also recommended). Only the state
-file path can be overridden, and its default is already per-agent.
+### Solana (SOL, USDC)
 
-### Remote monitor (tonapi-relay)
+| Variable | Default | Purpose |
+|---|---|---|
+| `SOL_WALLET_PK` | — | agent key; required for SOL and USDC |
+| `SOL_CLUSTER` | `mainnet` | or `devnet` |
+| `SOL_RPC_URL` | public RPC | use a keyed one: the public RPC answers 429 under load |
+| `SOL_REGISTRY_ADDRESS` | devnet: built-in; mainnet: none | Solana registry; without it there is no Solana heartbeat |
+| `SOL_COMMITMENT` | `confirmed` | or `finalized` |
+| `SOL_REFUND_FEE_LAMPORTS` | `5000` | kept from a SOL refund |
+| `SOL_USDC_REFUND_FEE` | `5000` | micro-USDC kept from a USDC refund |
+| `SOL_USDC_REFUND_ATA_FEE` | `200000` | extra amount kept when the buyer's USDC account has to be recreated |
+| `SOL_USDC_SOURCE_COOLDOWN_SEC` | `60` | pause on the buyer's USDC account after a failed settle |
+| `SOL_USDC_IP_MAX_FAILED_SETTLES` / `SOL_USDC_IP_FAILURE_WINDOW_SEC` | `5` / `600` | cap on failed settles per IP (`0` = off) |
 
-Optional. When `MONITOR_SERVICE_URL` env is set, the sidecar offloads
-on-chain watching to a separate **tonapi-relay** service. The sidecar:
+- **RPC.** An idle agent makes about 0.26M requests a month: SOL signature polling every 10 s, plus a `getHealth` probe every 15 s (~0.18M) for a USDC-only agent. That fits a free keyed RPC (Helius Free: 1M credits).
+- **USDC goes over x402 and the agent pays the network fee.** That is why it rejects transactions with a compute limit above 60 000 or a priority fee above 30 000 lamports. The agent loses SOL only on a transaction that fails on-chain; simulation rejects a bad one for free. Against racing payments from one account the agent has three throttles, all answering 429 with `Retry-After`:
+  - one settle at a time per buyer account (`settle_in_progress`);
+  - a pause on the account after an on-chain failure (`source_cooldown`);
+  - a cap on failures per IP (`too_many_failed_settlements`).
+- **Heartbeat** costs 0.00014 SOL a week (a transfer plus Memo `CTLX:REG:<json>`). An agent with both keys sends heartbeats to both registries.
 
-- Calls `POST {MONITOR_SERVICE_URL}/subscribe` at startup with its
-  `agent_wallet` and (if USDT is enabled) `jetton_wallet`.
-- During `verify()`, instead of polling LiteBalancer, it asks the relay
-  via `GET {MONITOR_SERVICE_URL}/tx/by_nonce?nonce=...&rail=...`.
-- Retries up to 3 times with 3-second sleeps between attempts to absorb
-  race conditions where the paid invoke arrives before the TonAPI webhook
-  reaches the relay.
+### Gas balance
 
-If `MONITOR_SERVICE_URL` is unset, the sidecar runs in legacy mode
-(LiteBalancer + TonAPI HTTP fallback) — fully backward-compatible.
-
-Use the relay when you have many sidecars on one host and want a single
-TonAPI webhook subscription instead of per-agent polling. See
-`tonapi-relay/` repo for the receiver side.
-
-### Images
-
-Put files in `IMAGES_DIR` (default `./images/`) — they are served from your
-agent at `GET /images/{name}`. Point `AGENT_PREVIEW_URL` / `AGENT_AVATAR_URL`
-/ `AGENT_IMAGES` at those URLs (or any public HTTP/HTTPS host) and they land
-in the heartbeat payload.
-
-Constraints enforced by the sidecar before sending heartbeat:
-
-- Only `http://` and `https://` schemes
-- SVG is blocked (inline script risk); use PNG, JPEG, GIF or WebP
-- Each URL ≤ 512 chars; `AGENT_IMAGES` capped at 5 entries
-- Total heartbeat payload ≤ 2 KB — otherwise media fields are dropped with a warning
-
-The local `/images/` route enforces the same MIME whitelist and blocks path
-traversal and symlink escapes.
-
-> **USDT agents must maintain a TON balance.**
-> Even if you accept only USDT, the agent wallet needs TON to pay gas for refunds.
-> Each refund burns ~0.06 TON from the agent's TON balance (jetton transfer gas).
-> Keep at least **0.5–1 TON** on the agent wallet and top it up periodically.
-
-**3. Check your config:**
-```bash
-.venv/bin/sidecar doctor --env-file my-agent/.env
-```
-
----
+Refunds and heartbeats are paid from the agent's own wallet:
+- a USDT refund costs ~0.06 TON — keep 0.5–1 TON on the wallet even if you sell only for USDT;
+- a TON heartbeat costs 0.01 TON a week;
+- on Solana, keep a little SOL: every refund pays the 5000-lamport fee, and a USDC refund to a closed account also pays its rent (~0.0015 SOL), which is covered by `SOL_USDC_REFUND_ATA_FEE`.
 
 ## Running
 
-**One-off / dev mode:**
 ```bash
-.venv/bin/sidecar run --env-file agents-examples/translator/.env
+.venv/bin/sidecar run --env-file my-agent/.env                 # in the foreground
+sudo .venv/bin/sidecar service install --name my-agent --env-file my-agent/.env
 ```
 
-**Testnet:**
-```bash
-TESTNET=true .venv/bin/sidecar run --env-file .env
-```
-
-**As a systemd service (production):**
-```bash
-sudo .venv/bin/sidecar service install \
-  --name my-agent \
-  --workdir /path/to/project \
-  --env-file /path/to/agent/.env
-```
-
-The service name will be `my-agent-ctlx-agent.service`. Starts immediately and auto-restarts on reboot.
-
----
-
-## Managing the service
-
-If you have only one agent installed, `--name` can be omitted — it is auto-detected.
+`service install` creates a systemd unit `my-agent-ctlx-agent.service`, enables it, and starts it. Manage it only through the CLI (`--name` can be omitted if there is a single agent):
 
 ```bash
-# Status
-.venv/bin/sidecar service status --name my-agent
-
-# Logs (live)
+.venv/bin/sidecar service status|start|stop --name my-agent
+.venv/bin/sidecar service restart --name my-agent --env-file my-agent/.env
 .venv/bin/sidecar service logs --name my-agent -f
-
-# Logs (last 100 lines)
-.venv/bin/sidecar service logs --name my-agent --lines 100
-
-# Restart / stop
-.venv/bin/sidecar service restart --name my-agent
-.venv/bin/sidecar service stop --name my-agent
-
-# Remove service
 sudo .venv/bin/sidecar service uninstall --name my-agent
 ```
 
-> If your agent doesn't send a heartbeat for >7 days, it disappears from the marketplace.
+## Local files
 
----
+The files are named after `AGENT_NAME`, so several agents can live in one directory:
+
+| File | Contents |
+|---|---|
+| `.sidecar_state.<slug>.json` | `sidecar_id`, heartbeat timestamps (path: `SIDECAR_STATE_PATH`) |
+| `processed_txs.<slug>.db` | consumed payments, refund queue |
+| `stock.<slug>.db` | stock |
+
+Do not delete them on a live agent: they hold replay protection and pending refunds.
+
+## HTTP API
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/info` | name, SKUs, prices per rail, schemas, rail health |
+| `POST` | `/quote` | price for specific arguments (if `AGENT_HAS_QUOTE`) |
+| `POST` | `/invoke` | call: without payment → `402`, with proof → result or `job_id` |
+| `GET` | `/result/{job_id}` | async call result |
+| `GET` | `/download/{file_id}` | file from a `file` result |
+| `GET` | `/images/{name}` | images from `IMAGES_DIR` |
+
+Request and response formats are in [`CONTRACTS.md`](../CONTRACTS.md).
 
 ## Tests
 
 ```bash
-# Install test dependencies
-.venv/bin/pip install pytest pytest-asyncio pytest-cov
-
-# Run tests (from sidecar/ directory)
 cd sidecar
-../.venv/bin/python -m pytest tests -v
-
-# Run with coverage report
-../.venv/bin/python -m pytest tests --cov=. --cov-report=term-missing
+../.venv/bin/pip install pytest pytest-asyncio
+../.venv/bin/python -m pytest -q
 ```
 
-Tests also run automatically on every PR and push to master via GitHub Actions.
-
----
-
-## HTTP API
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/info` | Agent metadata, price, schema |
-| `POST` | `/invoke` | Call agent (requires TON payment) |
-| `GET` | `/result/{job_id}` | Poll async job result |
-
----
-
-## MCP Server
-
-All of the above — discovery, invocation, deployment, and service management — is also available via the [MCP server](../mcp/). Connect it to Claude, GPT, or any LLM and let them operate agents autonomously without a browser or manual HTTP calls. See [`mcp/README.md`](../mcp/README.md) for setup.
+The same tests run in CI on every PR. Devnet runs with real Solana transactions are in [`experiments/devnet/`](experiments/devnet/).

@@ -2,60 +2,41 @@
 
 > [English version](README.md)
 
-Готовые агенты, работающие поверх [сайдкара](../sidecar/). Каждый агент — самостоятельный скрипт, общающийся через stdin→stdout.
+Готовые агенты для [сайдкара](../sidecar/). Каждый — один `agent.py` по контракту stdin/stdout. В каждом каталоге свои `.env.example` и `requirements.txt`.
 
----
+| Каталог | Что делает | Внешний сервис |
+|---|---|---|
+| `translator/` | переводит текст | Gemini |
+| `summarizer/` | делает краткое содержание текста | Gemini |
+| `imagegen/` | генерирует картинку (PNG) | Gemini |
+| `videogen/` | генерирует видео | Gemini |
+| `text2voice/` | озвучивает текст | — |
+| `ton-storage/` | загружает файл в TON Storage, возвращает bag ID | TON Storage API |
+| `ton-dns-bind/` | собирает изменение записи TON DNS и отдаёт QR для подписи | — |
+| `list-seller/` | продаёт строки из списка, по одной за вызов; когда список кончается, отвечает `out_of_stock` | — |
+| `orchestrator/` | через LLM планирует цепочку вызовов других агентов, показывает цену в quote, оплачивает каждый шаг | Gemini |
 
-## Агенты
+## Запуск
 
-| Агент | Директория | Что делает | Вход | Выход |
-|-------|-----------|-----------|------|-------|
-| **Переводчик** | `translator/` | Переводит текст (Gemini) | текст + язык | переведённый текст |
-| **Генератор изображений** | `imagegen/` | Генерирует изображения (Imagen) | промпт | PNG файл |
-| **Оркестратор** | `orchestrator/` | Строит цепочки вызовов агентов через LLM | задача в свободной форме | совмещённые результаты |
-| **TON Storage** | `ton-storage/` | Загружает файлы в TON Storage | файл + срок хранения | bag ID |
-| **Суммаризатор** | `summarizer/` | Суммаризирует текст | текст | краткое содержание |
-| **Text2Voice** | `text2voice/` | Озвучка текста | текст | аудиофайл |
-| **Генератор видео** | `videogen/` | Генерирует видео | промпт | видеофайл |
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e ./sidecar -r agents-examples/translator/requirements.txt
+cp agents-examples/translator/.env.example agents-examples/translator/.env   # впишите ключи и кошелёк
+.venv/bin/sidecar run --env-file agents-examples/translator/.env
+```
 
----
-
-## Контракт агента
-
-Все агенты следуют одному паттерну:
+## Минимальный агент
 
 ```python
 import json, sys
 
 task = json.load(sys.stdin)
-
 if task.get("mode") == "describe":
-    # Вернуть схему для регистрации на маркетплейсе
-    json.dump({"args_schema": {
-        "text": {"type": "string", "description": "Входной текст", "required": True}
-    }}, sys.stdout)
+    json.dump({"args_schema": {"text": {"type": "string", "description": "Input", "required": True}},
+               "result_schema": {"type": "string"}}, sys.stdout)
 else:
-    # Выполнить работу
-    body = task.get("body", {})
-    result = do_work(body)
-    json.dump({"result": result}, sys.stdout)
+    text = task["body"]["text"]
+    json.dump({"result": {"type": "string", "data": text.upper()}}, sys.stdout)
 ```
 
-При ошибке — выход с ненулевым кодом и запись в stderr. Сайдкар автоматически сделает рефанд.
-
----
-
-## Запуск примера
-
-Из корня проекта:
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r sidecar/requirements.txt
-.venv/bin/pip install -r agents-examples/translator/requirements.txt
-
-cp agents-examples/translator/.env.example agents-examples/translator/.env
-# заполните ключи в .env
-
-.venv/bin/python sidecar/sidecar.py run --env-file agents-examples/translator/.env
-```
+Ошибка — ненулевой код выхода и сообщение в stderr; сайдкар вернёт деньги покупателю. Полный контракт — в [sidecar/README.ru.md](../sidecar/README.ru.md#контракт-агента).

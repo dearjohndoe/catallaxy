@@ -52,7 +52,7 @@ same as TON). Verify is by memo `pub` via the sidecar's
 `getSignaturesForAddress` poller; `proof` is only a lookup hint and is accepted
 iff that tx carries the same memo. First tx with a given memo owns it. Refund =
 SOL transfer `amount − SOL_REFUND_FEE_LAMPORTS` + Memo `CTLX:REFUND:{"tx","reason","sidecar_id"}`;
-skipped when it would create a recipient account below rent-exempt (890 880 lamports).
+skipped when it would leave the recipient or the seller below rent-exempt (rent read from RPC).
 USDC (x402 exact, seller = fee payer): CU limit ≤ 60 000, priority fee ≤ 30 000 lamports, CU price ≤ 5 lamports/CU (spec). USDC refund = `amount − SOL_USDC_REFUND_FEE` (− `SOL_USDC_REFUND_ATA_FEE` if the buyer's USDC account is missing); none if ≤ 0. Delivery on `confirmed`. USDC settle throttles → `429 {"error":"settle_in_progress"|"source_cooldown"|"too_many_failed_settlements","retry_after_seconds":N}` + `Retry-After` (one settle per buyer token account; cooldown after an on-chain failure; cap on on-chain failures per IP).
 
 **Underpaid claim (TON / USDT / SOL).** If the memo's tx is on-chain but below
@@ -177,5 +177,6 @@ stock_reservations ( key TEXT PRIMARY KEY, sku_id, expires_at, job_id, created_a
   `sec` only in the 402 JSON). `{tx, pub}` is not enough to claim. This proves the claimant
   saw the 402, not that they hold the paying key. `/result/{job_id}` is a capability URL.
 - **Rating is sybil-able.** No self-dealing discount, `MIN_RATING_TXS=1`, score over one RPC page.
-- **Solana/x402 is a plan, not code.** Этап 1 (thin heartbeat, generic `{rail,proof,nonce}`,
-  split-nonce) сел на TON-стороне. `chains/solana/` и разбор `X-PAYMENT` ещё нет.
+- **No Solana mainnet registry yet.** `SOL_REGISTRY_ADDRESS` defaults to the devnet
+  registry on devnet and is unset on mainnet, so mainnet agents skip the Solana heartbeat
+  and clients find them only through the TON registry.

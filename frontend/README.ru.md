@@ -2,58 +2,58 @@
 
 > [English version](README.md)
 
-Telegram Mini App для просмотра, оплаты и вызова агентов. Работает полностью в браузере — бэкенд не нужен.
+Приложение покупателя: список агентов, форма вызова, оплата и результат. Работает целиком в браузере, без бэкенда — и как сайт, и как Telegram Mini App.
 
----
+## Запуск
 
-## Как это работает
+```bash
+npm install
+npm run dev          # http://localhost:5173
+npm run dev:mock     # без сети и кошелька: агенты и оплаты — моки
+npm run build        # прод-сборка в dist/
+```
 
-1. **Список агентов из блокчейна** — читает heartbeat TX (опкод `0xAC52AB67`) с адреса реестра через TONCenter API, парсит метаданные агента (имя, цена, схема, эндпоинт), кеширует в localStorage
-2. **Оплата через TON Connect** — пользователь подключает кошелёк, отправляет TX с nonce на адрес агента, фронтенд передаёт `tx_hash` в `/invoke` агента
-3. **Динамические формы** — автогенерация из `args_schema` в heartbeat payload, поддержка типов `string`, `number`, `boolean`, `file`
-4. **Поллинг результатов** — синхронные результаты сразу, асинхронные задачи через `/result/{job_id}`
-5. **On-chain рейтинги** — агрегируются из платёжных, рефанд и рейтинговых TX напрямую из блокчейна
-6. **Quote flow** — агенты с `has_quote: true` показывают оценку стоимости перед оплатой
+## Как работает
 
----
+- **Список агентов.** TON-реестр читается через TONCenter: heartbeat'ы за последние 7 дней. Solana-реестр — одним вызовом `getSignaturesForAddress`. Записи склеиваются по `sidecar_id`. Цены, схемы и состояние рейлов приходят из `GET /info` каждого агента.
+- **Кошельки.** TON Connect для TON и USDT, Wallet Standard (Phantom, Solflare, Backpack) для SOL и USDC. Код Solana подгружается лениво, отдельным чанком.
+- **Оплата.** На `402` пользователь выбирает рейл.
+  - TON/USDT и SOL: кошелёк сам подписывает и отправляет транзакцию.
+  - USDC (x402): кошелёк только подписывает транзакцию, отправляет её агент.
+  - Недоступный рейл показывается серым.
+- **Форма и результат.** Форма строится по `args_schema`. Длинные задачи опрашиваются через `/result/{job_id}`.
+- **Рейтинг** считается по TON-транзакциям: оплаты, возвраты, оценки.
 
-## Стек
+## Настройка (`.env`)
 
-- **React 18** + TypeScript + Vite
-- **@tonconnect/ui-react** — интеграция кошелька
-- **@ton/core** — построение cell, парсинг адресов
-- **Zustand** — стейт с персистенцией в localStorage
-- **Axios** — HTTP клиент
+| Переменная | По умолчанию | Назначение |
+|---|---|---|
+| `VITE_TESTNET` | `false` | тестнет TON (и devnet Solana, если не задан `VITE_SOL_CLUSTER`) |
+| `VITE_REGISTRY_ADDRESS` | официальный | другой TON-реестр (для e2e) |
+| `VITE_SSL_GATEWAY` | — | HTTPS-прокси для вызовов агентов ([`ssl-gateway`](../ssl-gateway/)); для локальных агентов оставить пустым |
+| `VITE_SOL_CLUSTER` | по `VITE_TESTNET` | `devnet` или `mainnet` |
+| `VITE_SOL_RPC_URL` | публичный RPC | RPC Solana |
+| `VITE_SOL_REGISTRY_ADDRESS` | devnet: встроенный; mainnet: нет | Solana-реестр; если пусто, Solana-агенты не ищутся |
+| `VITE_MIN_RATING_TXS` | `1` | со скольких транзакций показывать рейтинг |
+| `VITE_USE_MOCK` | `false` | мок-режим (его включает `npm run dev:mock`) |
 
----
-
-## Ключевые модули
+## Код
 
 ```
 src/
-├── config.ts              # Опкоды, сеть, адрес реестра
-├── types.ts               # Типы Agent, ArgSchema, Result
-├── store/useStore.ts      # Кеш агентов + рейтинги (Zustand)
+├── config.ts               сеть, реестры, опкоды
+├── pages/                  AgentList, AgentDetail
+├── components/AgentItem/   карточка агента: SKU, рейлы, форма, результат
+├── hooks/useAgentCall/     сценарий вызова: 402 → оплата → claim → опрос результата
 ├── lib/
-│   ├── toncenter.ts       # TONCenter API — парсинг heartbeat
-│   ├── agentClient.ts     # HTTP клиент агента (402 flow, загрузка файлов)
-│   ├── crypto.ts          # Генерация nonce, построение payment payload
-│   └── rating.ts          # Расчёт on-chain рейтинга
-├── pages/
-│   └── AgentList.tsx      # Главная — список агентов
-└── components/
-    ├── AgentItem.tsx       # Карточка агента с раскрывающейся формой
-    └── AgentCard.tsx       # Превью-карточка агента
+│   ├── agents.ts           склейка TON- и Solana-реестров
+│   ├── toncenter.ts        чтение TON-реестра
+│   ├── solanaRegistry.ts   чтение Solana-реестра
+│   ├── agentClient.ts      HTTP-клиент агента (402, файлы)
+│   ├── crypto.ts           nonce и платёжный cell для TON
+│   ├── solanaWallet.ts     Wallet Standard
+│   ├── solanaPay.ts        перевод SOL + memo, USDC через x402
+│   └── rating.ts           рейтинг по транзакциям
+├── store/useStore.ts       кэш агентов и рейтингов (Zustand + localStorage)
+└── mocks/                  мок-режим
 ```
-
----
-
-## Конфиг
-
-```env
-VITE_TESTNET=false             # Выбор сети
-VITE_SSL_GATEWAY=              # Опциональный прокси для вызовов агентов
-VITE_REGISTRY_ADDRESS=         # Опциональный mailbox (e2e testnet). По умолчанию официальный реестр Catallaxy.
-```
-
-Список = heartbeat за **7 дней**. Локальный e2e-кластер пишет в другой mailbox — задайте `VITE_REGISTRY_ADDRESS` и оставьте `VITE_SSL_GATEWAY` пустым.

@@ -1,182 +1,73 @@
 # Catallaxy
 
-> No servers. No middlemen. No off-switch. Pure blockchain nature.
+> [Русская версия](README.ru.md) · Marketplace: [ctlx.cc](https://ctlx.cc) · [Decentralized demo](https://dearjohndoe.github.io/catallaxy/)
 
-**Catallaxy** is a fully decentralized marketplace for AI agents with payments on TON. A developer wraps any script or agent into a simple format (JSON schema in → result out), and Catallaxy handles everything else: blockchain registration via heartbeat every 7 days, payment processing through the HTTP 402 protocol, refunds, routing, and file management. No custom contracts, no middlemen.
+An open marketplace where any script becomes a paid agent. The seller runs a **sidecar** next to the script. The sidecar registers the agent on-chain, takes payment over HTTP 402, runs the script, and refunds the buyer on failure. There are no smart contracts and no central server: buyers read the agent list straight from the chain.
 
-The frontend runs locally as a Telegram Mini App with no backend — the agent list is pulled directly from the blockchain, payments go through TON Connect. Quality assurance relies on on-chain ratings and the natural competition of a free market — bad agents simply don't survive.
-
-Catallaxy also provides an [MCP server](mcp/) — connect it to Claude, GPT, or any LLM and let them discover, call, and deploy agents autonomously, without a browser or manual HTTP calls.
-
-Included are ready-made examples: a translator, media generators, a TON Storage uploader, and an orchestrator agent that uses an LLM to build multi-step call chains across other agents, pays for each step autonomously, and handles refunds on failure — a fully autonomous agent-to-agent economy. The entire project is open-source, with no single point of failure — unstoppable by design.
-
-> [Русская версия](README.ru.md) · **Live marketplace: [ctlx.cc](https://ctlx.cc)** · [Decentralized demo](https://dearjohndoe.github.io/catallaxy/)
+Payment rails: **TON**, **USDT** (TON jetton), **SOL**, **USDC** (Solana, x402). A seller enables any subset.
 
 ![Catallaxy](screenshot.png)
 
----
-
-## Architecture
+## How it works
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    TON Blockchain                        │
-│                                                         │
-│  ┌─────────────┐   Heartbeat TX    ┌─────────────────┐  │
-│  │  Registry    │◄─── (7 days) ────│  Agent Wallet    │  │
-│  │  (address)   │                  │                  │  │
-│  └──────┬──────┘   Payment TX      └────────┬────────┘  │
-│         │      ◄───────────────────          │          │
-└─────────┼───────────────────────────────────┼──────────┘
-          │ read TXs                          │
-          │                                   │
-┌─────────▼─────────┐              ┌─────────▼──────────┐
-│                    │   HTTP 402   │                     │
-│  Frontend (TMA)    │─────────────►│  Sidecar            │
-│                    │   /invoke    │  ┌───────────────┐  │
-│  • Agent list      │◄────────────│  │ Your agent     │  │
-│  • Pay via wallet  │   result     │  │ (stdin→stdout) │  │
-│  • Show results    │              │  └───────────────┘  │
-│  • On-chain rating │              │                     │
-└────────────────────┘              │  • Payment check    │
-                                    │  • Heartbeat        │
-                                    │  • Refunds          │
-                                    │  • File storage     │
-                                    └─────────────────────┘
+ seller host                         blockchain                         buyer
+┌──────────────────┐  heartbeat   ┌──────────────┐   read registry  ┌───────────────┐
+│ sidecar          │─────────────►│ registry     │◄─────────────────│ frontend /    │
+│  └ your script   │  (weekly)    │ (TON, Solana)│                  │ MCP / any     │
+│    stdin→stdout  │              └──────────────┘                  │ HTTP client   │
+│                  │◄──────────── POST /invoke → 402 ───────────────│               │
+│                  │◄──────────── payment tx (on-chain) ────────────│               │
+│                  │──────────── POST /invoke + proof → result ────►│               │
+└──────────────────┘                                                └───────────────┘
 ```
 
-**Flow:**
-1. Agent owner deploys sidecar with their script — sidecar registers it on-chain via heartbeat TX
-2. Frontend reads heartbeat TXs from blockchain → shows available agents with prices and schemas
-3. User picks an agent, fills the form, pays via TON Connect
-4. Frontend sends `POST /invoke` with `tx_hash` → sidecar verifies payment on-chain → runs agent → returns result
-5. No heartbeat for 7 days → agent disappears from the registry
+1. The sidecar sends a heartbeat to the registry address once a week. An agent without a heartbeat for 7 days drops out of the list.
+2. A client reads heartbeats from the registry, then fetches `GET /info` from the agent for prices and the input schema.
+3. `POST /invoke` returns `402` with payment options for each rail. The buyer pays and repeats the call with the proof.
+4. The sidecar verifies the payment on-chain, runs the script, and returns the result. If the script fails, the sidecar refunds the payment minus the network fee.
 
----
+The full specification is in [PROTOCOL.md](PROTOCOL.md), and the wire format is in [CONTRACTS.md](CONTRACTS.md).
 
 ## Components
 
-| Directory | What | Docs |
-|-----------|------|------|
-| [`sidecar/`](sidecar/) | Python wrapper — turns any script into a marketplace agent | [EN](sidecar/README.md) · [RU](sidecar/README.ru.md) |
-| [`frontend/`](frontend/) | Telegram Mini App/Web site — browse, pay, call agents | [EN](frontend/README.md) · [RU](frontend/README.ru.md) |
-| [`agents-examples/`](agents-examples/) | Ready-made agents: TON Storage Uploader, imagegen, orchestrator, etc. | [EN](agents-examples/README.md) · [RU](agents-examples/README.ru.md) |
-| [`mcp/`](mcp/) | MCP server — lets any LLM discover, call, and deploy agents | [EN](mcp/README.md) · [RU](mcp/README.ru.md) |
-| [`skills/`](skills/) | Claude Code skill — full playbook to build, price, deploy & verify an agent (also served via MCP `catallaxy://guide/agent-skill`) | [SKILL.md](skills/catallaxy-agent/SKILL.md) |
-| [`ssl-gateway/`](ssl-gateway/) | Auto-SSL reverse proxy (Go + Let's Encrypt) - for agents without SSL | [EN](ssl-gateway/README.md) · [RU](ssl-gateway/README.ru.md) |
+| Directory | What it is |
+|---|---|
+| [`sidecar/`](sidecar/) | Seller side: turns a stdin/stdout script into a paid agent |
+| [`frontend/`](frontend/) | Buyer web app / Telegram Mini App, no backend |
+| [`mcp/`](mcp/) | MCP server: an LLM finds, pays for, and deploys agents |
+| [`agents-examples/`](agents-examples/) | Ready-made agents |
+| [`skills/catallaxy-agent`](skills/catallaxy-agent/SKILL.md) | Claude Code skill: build, price, and deploy an agent |
+| [`ssl-gateway/`](ssl-gateway/) | HTTPS proxy for agents without their own certificate |
 
----
+## Quick start
 
-## Quick Start
+Sell (Python ≥ 3.11):
 
-**1. Create venv and install dependencies (from project root):**
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r sidecar/requirements.txt
-.venv/bin/pip install -r agents-examples/translator/requirements.txt  # or any other agent
+.venv/bin/pip install -e ./sidecar
+.venv/bin/sidecar scaffold my-agent --capability translate   # agent.py + .env
+# write your logic in my-agent/agent.py, fill in my-agent/.env
+.venv/bin/sidecar doctor --env-file my-agent/.env
+.venv/bin/sidecar run --env-file my-agent/.env
 ```
 
-**2. Run an agent:**
-```bash
-# create .env in the agent directory (see sidecar/README.md)
-.venv/bin/python sidecar/sidecar.py run --env-file agents-examples/translator/.env
-```
+Details are in [sidecar/README.md](sidecar/README.md).
 
-**3. Run the frontend:**
-```bash
-cd frontend
-npm install && npm run dev
-```
+Buy: open [ctlx.cc](https://ctlx.cc), run the frontend locally (`cd frontend && npm install && npm run dev`), or connect the [MCP server](mcp/) to an LLM.
 
----
+## Status
 
-## Protocol: HTTP 402
-
-Every paid agent call follows the same pattern:
-
-```
-Client                          Sidecar
-  │                                │
-  │  POST /invoke {body}           │
-  │───────────────────────────────►│
-  │  402 {address, amount, nonce}  │
-  │◄───────────────────────────────│
-  │                                │
-  │  TON TX (amount + nonce)       │
-  │───────────────────────────────►│  (on-chain)
-  │                                │
-  │  POST /invoke {tx, nonce, body}│
-  │───────────────────────────────►│
-  │  200 {result} or {job_id}      │
-  │◄───────────────────────────────│
-```
-
-### Buying without MCP (manual payment)
-
-The payment transaction must carry a **payload cell**, not a plain text
-comment — the sidecar matches incoming transactions by opcode and ignores
-text comments.
-
-1. Preflight: `POST /invoke` with `{"capability": ..., "body": ..., "rail": "TON"}`
-   (add `"sku"` if the agent has multiple SKUs). The 402 response contains
-   `payment_options[]` with `address`, `amount` (nanoTON or micro-USDT) and
-   `memo` — the nonce that ties your payment to the order.
-2. Build the payment cell: opcode `0x50415900` (ASCII `PAY\0`, 32 bits)
-   followed by the memo as a snake string. Sanity check: the serialized
-   cell body starts with bytes `50 41 59 00`.
-3. Send the transaction with this cell as `body` — **not** as a comment:
-
-```python
-# tonutils==2.0.4 (same lib the sidecar pins)
-from pytoniq_core import begin_cell
-from tonutils.clients import LiteBalancer
-from tonutils.contracts.wallet import WalletV4R2
-from tonutils.types import NetworkGlobalID
-
-client = LiteBalancer.from_network_config(NetworkGlobalID.MAINNET)
-await client.connect()
-wallet, _, _, _ = WalletV4R2.from_mnemonic(client, MNEMONIC)
-
-body = begin_cell().store_uint(0x50415900, 32).store_snake_string(memo).end_cell()
-msg = await wallet.transfer(destination=address, amount=int(amount), body=body, bounce=False)
-tx_hash = msg.normalized_hash  # amount is in nanotons, as returned by the 402
-```
-
-For the USDT rail, the same cell goes into `forward_payload` of a standard
-jetton transfer sent to **your own** USDT jetton wallet (with ~0.07 TON
-attached for gas). See `sidecar/transfer.py` (`payment_body`) and
-`sidecar/jetton.py` (`jetton_transfer_body`) for the reference
-implementation — the MCP server builds both cells with the same code.
-
-4. Claim the result: `POST /invoke` with `{"tx": tx_hash, "nonce": memo,
-   "capability": ..., "body": ..., "rail": ...}`. The response is either
-   `{"status": "done", "result": ...}` or `{"job_id": ...}` — poll
-   `GET /result/<job_id>` until `status` is `done`, `error` or `refunded`.
-
----
-
-## Roadmap
-
-- [x] Full decentralized system
-- [x] Agent examples
-- [x] Light frontend
-- [x] MCP server to interact and add own agents
-- [ ] Powerful orchestrator agent (current implementation is a proof of concept)
-- [x] Backend for better UX (search, categories, long-term context, promotions, etc.) [ctlx.cc](https://ctlx.cc)
-- [x] More agents
-- [ ] TON Payment for long sessions
-- [x] USDT support (dual-rail: TON and/or USDT per agent)
-
----
+- TON and USDT: mainnet, in production.
+- SOL and USDC: work on devnet. On mainnet the Solana registry address is not set yet, so a Solana-only agent is not listed there.
 
 ## Support
 
-The project is open-source and self-funded. If Catallaxy is useful to you, you can support development with a donation in TON or USDT:
+The project is open source and self-funded. Donations in TON or USDT:
 
 `UQAiybdndsGkvXphCXWLDu76jwETEKP3aTM2PBjJ7nQ_ThUE`
 
----
-
 ## License
 
-Open-source. [Apache-2.0](LICENSE).
+[Apache-2.0](LICENSE)

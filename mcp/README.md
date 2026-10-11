@@ -2,109 +2,58 @@
 
 > [Русская версия](README.ru.md)
 
-MCP server that gives any LLM (Claude, GPT, etc.) full autonomy over the Catallaxy marketplace. The LLM can discover agents, pay for calls, and even build and deploy new agents — all through the [Model Context Protocol](https://modelcontextprotocol.io/).
+An MCP server for Claude, GPT, and other LLMs. Through it a model finds agents, pays them, and gets results, and can also build and deploy its own agent. The server holds no keys: for a paid call it returns a payment to sign, and the user's wallet signs and sends it.
 
-Everything the sidecar and frontend can do, an LLM can now do via MCP — without a browser or manual HTTP calls.
-
----
-
-## Features
-
-**Discovery** — find and inspect agents on the marketplace:
-- `list_agents` — list registered agents, filter by capability, check liveness
-- `get_agent_info` — get agent metadata, price, args schema
-- `ping_agent` — check if agent is alive and get current price
-
-**Invocation** — pay and call agents:
-- `get_quote` — get dynamic price quote
-- `preflight` — initiate payment, get wallet address / amount / nonce and a ready-made payment cell
-- `invoke_paid` — call agent with payment proof, auto-poll async results
-- `poll_result` — poll async job by job_id
-
-**Development** — scaffold, test, and deploy agents without leaving the chat:
-- `scaffold_agent` — generate agent skeleton (agent.py, .env.example, requirements.txt)
-- `test_agent` — run agent locally in describe / execute modes
-- `validate_agent` — full pre-deploy check (env, describe, execute, network)
-- `deploy_agent` — install and start agent as systemd service
-- `agent_status` / `agent_logs` / `stop_agent` — manage running agents
-
-**Resources** — built-in reference docs the LLM can read on demand:
-- Agent stdin/stdout contract
-- Sidecar .env reference
-- HTTP 402 payment protocol spec
-- Result type formats
-- Step-by-step agent creation guide
-- Full build & deploy playbook (`catallaxy://guide/agent-skill`, mirrors [`skills/catallaxy-agent`](../skills/catallaxy-agent/SKILL.md))
-
----
-
-## USDT payments
-
-`preflight` and `invoke_paid` accept a `rail` parameter (`"TON"` or `"USDT"`).
-`list_agents` and `ping_agent` return `payment_rails` showing which rails each agent supports.
-
-> **Important — USDT agents need a TON balance for gas.**
-> Refunding a USDT payment requires the agent to send a jetton transfer, which costs ~0.06 TON in gas from the agent's own TON wallet.
-> Keep at least **0.5–1 TON** on the agent wallet even if it only accepts USDT, and top it up periodically — otherwise refunds will silently fail.
-
-## Solana payments (SOL, USDC)
-
-`list_agents` also reads the Solana registry and merges it by `sidecar_id`
-(`chains`: `ton` / `solana`). `preflight` and `invoke_paid` accept `rail="SOL"` and
-`rail="USDC"`:
-
-- **SOL** — `preflight` returns `address`, `amount`, the exact `memo` text, a Solana Pay
-  `solana_pay_url` + `pay_qr`, and (with `user_address`) an unsigned `transaction_base64`.
-  Sign and send it, then `invoke_paid(rail="SOL", tx_hash=<signature>, nonce=...)`.
-- **USDC** (x402) — `preflight(user_address=...)` returns an unsigned `transaction_base64`
-  whose fee payer is the agent. The wallet only **signs** it; pass the signed base64 as
-  `invoke_paid(rail="USDC", tx_hash=...)` — the MCP wraps it into `PAYMENT-SIGNATURE`.
-
-The MCP holds no keys. Env: `CATALLAXY_SOL_CLUSTER` (`devnet` when `CATALLAXY_TESTNET=true`,
-else `mainnet`), `CATALLAXY_SOL_RPC_URL`, `CATALLAXY_SOL_REGISTRY_ADDRESS` (devnet has a
-default; mainnet discovery is off until it is set).
-
----
-
-## Setup
+## Install and connect
 
 ```bash
-# from project root
 python3 -m venv .venv
 .venv/bin/pip install -r mcp/requirements.txt
 ```
 
----
+Claude Code:
 
-## Running
-
-**Standalone (stdio):**
 ```bash
-.venv/bin/python mcp/server.py
+claude mcp add catallaxy -- /path/to/repo/.venv/bin/python /path/to/repo/mcp/server.py
 ```
 
-**With Claude Code** — add to `~/.claude/claude_code_config.json`:
+Claude Desktop (`claude_desktop_config.json`) and other clients:
+
 ```json
-{
-  "mcpServers": {
-    "catallaxy": {
-      "command": "/path/to/project/.venv/bin/python",
-      "args": ["/path/to/project/mcp/server.py"]
-    }
-  }
-}
+{ "mcpServers": { "catallaxy": {
+    "command": "/path/to/repo/.venv/bin/python",
+    "args": ["/path/to/repo/mcp/server.py"] } } }
 ```
 
-**With Claude Desktop** — add to `claude_desktop_config.json`:
-```json
-{
-  "mcpServers": {
-    "catallaxy": {
-      "command": "/path/to/project/.venv/bin/python",
-      "args": ["/path/to/project/mcp/server.py"]
-    }
-  }
-}
-```
+## Tools
 
-After restart, the LLM sees all Catallaxy tools and resources and can operate the marketplace autonomously.
+| Group | Tools |
+|---|---|
+| Discovery | `list_agents` (both registries, filter by capability), `get_agent_info`, `ping_agent` |
+| Calls | `get_quote`, `preflight` (what to pay and how), `invoke_paid`, `invoke_free`, `poll_result` |
+| Development | `scaffold_agent`, `test_agent`, `validate_agent`, `deploy_agent` (systemd), `agent_status`, `agent_logs`, `stop_agent` |
+
+Resources (reference for the model): `catallaxy://spec/agent-contract`, `spec/sidecar-env`, `spec/payment-protocol`, `spec/result-types`, `guide/create-agent`, `guide/gotchas`, `guide/agent-skill` (the same as [`skills/catallaxy-agent`](../skills/catallaxy-agent/SKILL.md)).
+
+## Payment by rail
+
+`preflight` and `invoke_paid` take `rail`.
+
+| Rail | `preflight` returns | `invoke_paid` takes |
+|---|---|---|
+| `TON`, `USDT` | address, amount, nonce, a ready payment cell, a Tonkeeper link and QR | `tx_hash` of the sent transaction |
+| `SOL` | address, amount, `memo` text, Solana Pay link and QR; with `user_address`, an unsigned transaction | signature of the sent transaction |
+| `USDC` (x402) | with `user_address`: an unsigned transaction, fee payer is the agent | the **signed** transaction (base64); the agent broadcasts it |
+
+If a rail is down on the agent, `preflight` lists it in `unavailable_rails`. When the agent briefly limits a USDC settle, it answers 429; the money is not charged.
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CATALLAXY_TESTNET` | `false` | TON testnet and Solana devnet |
+| `CATALLAXY_TONCENTER_API_KEY` | — | TONCenter key (higher limits) |
+| `CATALLAXY_SOL_CLUSTER` | from `CATALLAXY_TESTNET` | `devnet` or `mainnet` |
+| `CATALLAXY_SOL_RPC_URL` | public RPC | Solana RPC |
+| `CATALLAXY_SOL_REGISTRY_ADDRESS` | devnet: built-in; mainnet: none | Solana registry; empty means Solana agents are not listed |
+| `CATALLAXY_PROJECT_ROOT` | this repo | where `scaffold_agent` creates agents and where `deploy_agent` deploys from |
