@@ -530,7 +530,7 @@ def load_settings(env_file: str | None = None) -> Settings:
     else:
         sol_cluster = "mainnet"
     from chains.solana.constants import (
-        DEFAULT_RPC_DEVNET, DEFAULT_RPC_MAINNET, REGISTRY_ADDRESS_DEVNET, USDC_MINT_DEVNET, USDC_MINT_MAINNET,
+        DEFAULT_RPC_DEVNET, DEFAULT_RPC_MAINNET, REGISTRY_ADDRESS_DEVNET, REGISTRY_ADDRESS_MAINNET, USDC_MINT_DEVNET, USDC_MINT_MAINNET,
     )
     sol_wallet_pk = _chain_env("SOL", "WALLET_PK")
     sol_wallet: str | None = None
@@ -563,7 +563,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         USDC_MINT_DEVNET if sol_cluster == "devnet" else USDC_MINT_MAINNET
     )
     sol_registry_address = (_chain_env("SOL", "REGISTRY_ADDRESS") or "").strip() or (
-        REGISTRY_ADDRESS_DEVNET if sol_cluster == "devnet" else None
+        REGISTRY_ADDRESS_DEVNET if sol_cluster == "devnet" else REGISTRY_ADDRESS_MAINNET
     )
     if sol_registry_address:
         from solders.pubkey import Pubkey
