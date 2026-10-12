@@ -48,9 +48,13 @@ class UsdcRail:
     rail_id = "USDC"
 
     # No chain watcher here (we broadcast the buyer's tx ourselves), so health
-    # is the RPC we settle through: probed with ``getHealth`` on this cadence —
-    # unless ``health_from`` borrows it from a SOL rail polling the same RPC.
-    HEALTH_PROBE_INTERVAL = 15.0
+    # is the RPC we settle through: probed with ``getHealth`` every
+    # ``probe_interval`` (idle cadence: a settle reports its own RPC errors),
+    # every HEALTH_RETRY_INTERVAL after a failed probe — unless ``health_from``
+    # borrows it from a SOL rail polling the same RPC.
+    HEALTH_RETRY_INTERVAL = 15.0
+    # While probes succeed, health tolerates the probe gap plus this grace.
+    IDLE_HEALTH_GRACE = 60.0
 
     def __init__(
         self,
@@ -67,6 +71,7 @@ class UsdcRail:
         client_max_failures: int = SETTLE_IP_MAX_FAILURES,
         client_failure_window_seconds: float = SETTLE_IP_FAILURE_WINDOW_SECONDS,
         health_from: Callable[[float], bool] | None = None,
+        probe_interval: float = 300.0,
     ) -> None:
         self._kp = keypair
         self._refund_fee = refund_fee
@@ -87,6 +92,8 @@ class UsdcRail:
         self._get_sidecar_id = get_sidecar_id
         self.health_from = health_from
         self._last_ok_at: float = 0.0
+        self._last_failed = False
+        self._probe_interval = max(probe_interval, self.HEALTH_RETRY_INTERVAL)
         self._stop = asyncio.Event()
         self._probe_task: asyncio.Task[None] | None = None
 
@@ -104,18 +111,21 @@ class UsdcRail:
         ok = await self._rpc.get_health()
         if ok:
             self._last_ok_at = time.time()
+        self._last_failed = not ok
         return ok
 
     async def _probe_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=self.HEALTH_PROBE_INTERVAL)
+                interval = self.HEALTH_RETRY_INTERVAL if self._last_failed else self._probe_interval
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
                 return
             except asyncio.TimeoutError:
                 pass
             try:
                 await self.probe()
             except Exception:
+                self._last_failed = True
                 logger.exception("USDC rail: RPC health probe failed")
 
     @property
@@ -196,7 +206,11 @@ class UsdcRail:
         it is that source's verdict (a SOL poller on the same RPC)."""
         if self.health_from is not None:
             return self.health_from(max_age_seconds)
-        return self._last_ok_at > 0 and time.time() - self._last_ok_at <= max_age_seconds
+        if self._last_ok_at <= 0:
+            return False
+        if not self._last_failed:
+            max_age_seconds = max(max_age_seconds, self._probe_interval + self.IDLE_HEALTH_GRACE)
+        return time.time() - self._last_ok_at <= max_age_seconds
 
     async def consume(self, nonce: str) -> None:
         return None

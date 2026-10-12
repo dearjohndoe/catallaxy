@@ -150,6 +150,10 @@ class Settings:
     sol_usdc_ip_max_failed_settles: int = 5
     sol_usdc_ip_failure_window_seconds: int = 600
     sol_commitment: str = "confirmed"
+    # Solana RPC cadence: SOL signature poll while a payment is expected (or
+    # after a failure), and the idle cadence of that poll / of USDC's getHealth.
+    sol_poll_interval_seconds: float = 10.0
+    sol_idle_poll_interval_seconds: float = 300.0
     # Solana discovery registry wallet. None → no Solana heartbeat (mainnet has
     # no default yet).
     sol_registry_address: str | None = None
@@ -553,6 +557,10 @@ def load_settings(env_file: str | None = None) -> Settings:
     if min(sol_usdc_source_cooldown_seconds, sol_usdc_ip_max_failed_settles,
            sol_usdc_ip_failure_window_seconds) < 0:
         raise RuntimeError("SOL_USDC_SOURCE_COOLDOWN_SEC / SOL_USDC_IP_* must be >= 0")
+    sol_poll_interval_seconds = float(_chain_env("SOL", "POLL_INTERVAL_SEC") or "10")
+    sol_idle_poll_interval_seconds = float(_chain_env("SOL", "IDLE_POLL_INTERVAL_SEC") or "300")
+    if sol_poll_interval_seconds <= 0 or sol_idle_poll_interval_seconds < sol_poll_interval_seconds:
+        raise RuntimeError("SOL_POLL_INTERVAL_SEC must be > 0 and <= SOL_IDLE_POLL_INTERVAL_SEC")
     if sol_wallet_pk:
         from chains.solana.wallet import parse_solana_keypair
         sol_wallet = str(parse_solana_keypair(sol_wallet_pk).pubkey())
@@ -653,5 +661,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         sol_usdc_ip_max_failed_settles=sol_usdc_ip_max_failed_settles,
         sol_usdc_ip_failure_window_seconds=sol_usdc_ip_failure_window_seconds,
         sol_commitment=sol_commitment,
+        sol_poll_interval_seconds=sol_poll_interval_seconds,
+        sol_idle_poll_interval_seconds=sol_idle_poll_interval_seconds,
         sol_registry_address=sol_registry_address,
     )

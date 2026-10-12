@@ -156,6 +156,7 @@ class SidecarApp:
                     source_cooldown_seconds=settings.sol_usdc_source_cooldown_seconds,
                     client_max_failures=settings.sol_usdc_ip_max_failed_settles,
                     client_failure_window_seconds=settings.sol_usdc_ip_failure_window_seconds,
+                    probe_interval=settings.sol_idle_poll_interval_seconds,
                 )
             if "SOL" in sol_rails:
                 self.rails["SOL"] = SolRail(
@@ -166,10 +167,12 @@ class SidecarApp:
                     payment_timeout_seconds=settings.payment_timeout,
                     refund_fee_lamports=settings.sol_refund_fee_lamports,
                     commitment=settings.sol_commitment,
+                    poll_interval=settings.sol_poll_interval_seconds,
+                    idle_poll_interval=settings.sol_idle_poll_interval_seconds,
                 )
             if "USDC" in self.rails and "SOL" in self.rails:
                 # Same RPC: a successful SOL poll proves it, so skip USDC's own
-                # getHealth probe (~175k RPC credits/month per agent).
+                # getHealth probe.
                 self.rails["USDC"].health_from = self.rails["SOL"].monitor_healthy
 
     async def refund_user(

@@ -140,6 +140,13 @@ class SolanaPaymentMonitor:
     # and other smart wallets: RPC's ``memo`` field shows top-level only).
     # Capped so memo-less dust cannot turn one poll into an RPC flood.
     MAX_TX_FETCHES = 20
+    # Lazy polling: every ``poll_interval`` only while a payment is expected
+    # (a 402 was issued, see ``expect``) or after a failed poll; otherwise every
+    # ``idle_poll_interval``. A claim needs no poll at all — ``SolRail.verify``
+    # reads the buyer's signature and forces a poll itself — so an idle agent
+    # costs ~9k RPC credits/month instead of ~260k.
+    # While polls succeed, health tolerates the idle gap plus this grace.
+    IDLE_HEALTH_GRACE = 60.0
 
     def __init__(
         self,
@@ -147,11 +154,15 @@ class SolanaPaymentMonitor:
         address: str,
         *,
         poll_interval: float = 10.0,
+        idle_poll_interval: float = 300.0,
         commitment: str = "confirmed",
     ) -> None:
         self._rpc = rpc
         self._address = address
         self._poll_interval = poll_interval
+        self._idle_poll_interval = max(idle_poll_interval, poll_interval)
+        self._active_until: float = 0.0
+        self._last_failed = False
         self._commitment = commitment
         self._by_nonce: dict[str, tuple[str, float]] = {}
         self._watermark: str | None = None
@@ -183,8 +194,27 @@ class SolanaPaymentMonitor:
     def force(self) -> None:
         self._force.set()
 
+    def expect(self, window_seconds: float) -> None:
+        """A payment may land within ``window_seconds``: poll at the fast rate."""
+        was_idle = time.time() >= self._active_until
+        self._active_until = max(self._active_until, time.time() + window_seconds)
+        if was_idle:
+            self._force.set()  # pick up the fast rate now, not after the idle sleep
+
+    def current_interval(self) -> float:
+        if self._last_failed or time.time() < self._active_until:
+            return self._poll_interval
+        return self._idle_poll_interval
+
     def is_healthy(self, max_age_seconds: float = 60.0) -> bool:
-        return self._last_ok_at > 0 and time.time() - self._last_ok_at <= max_age_seconds
+        """Last poll succeeded within ``max_age_seconds`` — or, while polls keep
+        succeeding, within the idle interval (+grace): an idle gap is not an
+        outage. A failed poll drops back to the caller's strict bound."""
+        if self._last_ok_at <= 0:
+            return False
+        if not self._last_failed:
+            max_age_seconds = max(max_age_seconds, self._idle_poll_interval + self.IDLE_HEALTH_GRACE)
+        return time.time() - self._last_ok_at <= max_age_seconds
 
     def get(self, nonce: str) -> str | None:
         row = self._by_nonce.get(nonce)
@@ -199,7 +229,11 @@ class SolanaPaymentMonitor:
 
     async def poll(self) -> None:
         async with self._lock:
-            await self._poll_locked()
+            try:
+                await self._poll_locked()
+            except Exception:
+                self._last_failed = True
+                raise
 
     async def _poll_locked(self) -> None:
         now = time.time()
@@ -270,6 +304,7 @@ class SolanaPaymentMonitor:
         for key in [k for k, (_, seen) in self._by_nonce.items() if seen < cutoff]:
             del self._by_nonce[key]
         self._last_ok_at = time.time()
+        self._last_failed = False
 
     async def _cpi_nonce(self, signature: str) -> str | None:
         """CTLX:PAY nonce from a CPI memo. Raises when the tx can't be read yet
@@ -282,7 +317,7 @@ class SolanaPaymentMonitor:
     async def _loop(self) -> None:
         while not self._stop.is_set():
             try:
-                await asyncio.wait_for(self._force.wait(), timeout=self._poll_interval)
+                await asyncio.wait_for(self._force.wait(), timeout=self.current_interval())
             except asyncio.TimeoutError:
                 pass
             self._force.clear()

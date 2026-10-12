@@ -214,6 +214,21 @@ async def test_usdc_rail_health_follows_rpc_probe():
     assert rail._probe_task is None
 
 
+async def test_usdc_rail_probes_lazily_and_retries_fast():
+    rpc = AsyncMock()
+    rpc.get_health = AsyncMock(return_value=True)
+    rail = UsdcRail(keypair=Keypair(), rpc=rpc, cluster="devnet", mint=USDC_MINT_DEVNET,
+                    probe_interval=300)
+    await rail.probe()
+    rail._last_ok_at -= 200  # idle gap: healthy while probes keep succeeding
+    assert rail.monitor_healthy(60.0) is True
+    rail._last_ok_at -= 200
+    assert rail.monitor_healthy(60.0) is False
+    rpc.get_health = AsyncMock(return_value=False)
+    await rail.probe()
+    assert rail._last_failed is True  # loop now retries every HEALTH_RETRY_INTERVAL
+
+
 async def test_usdc_rail_borrows_health_without_probing():
     rpc = AsyncMock()
     seen = []

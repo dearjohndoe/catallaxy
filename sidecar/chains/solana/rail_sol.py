@@ -61,6 +61,8 @@ class SolRail:
         refund_fee_lamports: int = SIGNATURE_FEE_LAMPORTS,
         commitment: str = "confirmed",
         monitor: SolanaPaymentMonitor | None = None,
+        poll_interval: float = 10.0,
+        idle_poll_interval: float = 300.0,
     ) -> None:
         self._kp = keypair
         self._rpc = rpc
@@ -72,6 +74,7 @@ class SolRail:
         self._commitment = commitment
         self.monitor = monitor or SolanaPaymentMonitor(
             rpc, str(self.pay_to), commitment=commitment,
+            poll_interval=poll_interval, idle_poll_interval=idle_poll_interval,
         )
 
     # ── lifecycle ────────────────────────────────────────────────────────
@@ -180,6 +183,8 @@ class SolRail:
     def payment_option(self, amount: int, nonce: str) -> dict[str, Any]:
         # ``memo`` is the literal Memo-program text; ``nonce`` (with sec) is
         # added by the caller and must never go on-chain.
+        # The buyer may pay any time within the payment window: poll fast.
+        self.monitor.expect(self._payment_timeout)
         return {
             "rail": "SOL",
             "address": str(self.pay_to),
