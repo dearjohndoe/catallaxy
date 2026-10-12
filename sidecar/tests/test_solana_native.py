@@ -405,6 +405,53 @@ async def test_monitor_stays_unhealthy_when_rpc_fails():
     assert mon.is_healthy() is False
 
 
+async def test_monitor_polls_fast_only_while_payment_expected():
+    mon = SolanaPaymentMonitor(FakeRpc(), "S", poll_interval=10, idle_poll_interval=300)  # type: ignore[arg-type]
+    assert mon.current_interval() == 300
+    mon.expect(60)
+    assert mon.current_interval() == 10
+    assert mon._force.is_set()  # idle sleep is cut short
+    mon._active_until = time.time() - 1
+    assert mon.current_interval() == 300
+
+
+async def test_monitor_retries_fast_after_failed_poll():
+    rpc = FakeRpc()
+    mon = SolanaPaymentMonitor(rpc, "S", poll_interval=10, idle_poll_interval=300)  # type: ignore[arg-type]
+    rpc.fail_signatures = True
+    with pytest.raises(SolanaRpcError):
+        await mon.poll()
+    assert mon.current_interval() == 10
+    rpc.fail_signatures = False
+    await mon.poll()
+    assert mon.current_interval() == 300
+
+
+async def test_monitor_idle_gap_is_healthy_but_failure_is_not():
+    rpc = FakeRpc()
+    mon = SolanaPaymentMonitor(rpc, "S", poll_interval=10, idle_poll_interval=300)  # type: ignore[arg-type]
+    await mon.poll()
+    mon._last_ok_at -= 200  # idle: next poll not due yet
+    assert mon.is_healthy(60.0) is True
+    mon._last_ok_at -= 200  # idle gap + grace exceeded: poller is stuck
+    assert mon.is_healthy(60.0) is False
+    await mon.poll()
+    rpc.fail_signatures = True
+    with pytest.raises(SolanaRpcError):
+        await mon.poll()
+    assert mon.is_healthy(60.0) is True  # last success still fresh
+    mon._last_ok_at -= 61
+    assert mon.is_healthy(60.0) is False  # failing: strict bound
+
+
+async def test_payment_option_switches_monitor_to_fast_polling():
+    rail = _rail(payment_timeout_seconds=300)
+    assert rail.monitor.current_interval() == rail.monitor._idle_poll_interval
+    rail.payment_option(1_000, PUB_NONCE)
+    assert rail.monitor.current_interval() == 10
+    assert rail.monitor._active_until >= time.time() + 299
+
+
 async def test_monitor_ignores_rows_older_than_cache_ttl():
     rpc = FakeRpc()
     mon = SolanaPaymentMonitor(rpc, "S")  # type: ignore[arg-type]

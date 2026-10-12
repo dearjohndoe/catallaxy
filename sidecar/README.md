@@ -106,13 +106,15 @@ Stock is managed with `sidecar stock --env-file <file> show | set <sku> <total> 
 | `SOL_RPC_URL` | public RPC | use a keyed one: the public RPC answers 429 under load |
 | `SOL_REGISTRY_ADDRESS` | devnet: built-in; mainnet: none | Solana registry; without it there is no Solana heartbeat |
 | `SOL_COMMITMENT` | `confirmed` | or `finalized` |
+| `SOL_POLL_INTERVAL_SEC` | `10` | SOL payment poll while a payment is expected (after a 402) or after an RPC failure |
+| `SOL_IDLE_POLL_INTERVAL_SEC` | `300` | idle cadence of the SOL poll and of the USDC `getHealth` probe; set it equal to `SOL_POLL_INTERVAL_SEC` to always poll fast |
 | `SOL_REFUND_FEE_LAMPORTS` | `5000` | kept from a SOL refund |
 | `SOL_USDC_REFUND_FEE` | `5000` | micro-USDC kept from a USDC refund |
 | `SOL_USDC_REFUND_ATA_FEE` | `200000` | extra amount kept when the buyer's USDC account has to be recreated |
 | `SOL_USDC_SOURCE_COOLDOWN_SEC` | `60` | pause on the buyer's USDC account after a failed settle |
 | `SOL_USDC_IP_MAX_FAILED_SETTLES` / `SOL_USDC_IP_FAILURE_WINDOW_SEC` | `5` / `600` | cap on failed settles per IP (`0` = off) |
 
-- **RPC.** An idle agent makes about 0.26M requests a month: SOL signature polling every 10 s, plus a `getHealth` probe every 15 s (~0.18M) for a USDC-only agent. That fits a free keyed RPC (Helius Free: 1M credits).
+- **RPC.** Polling is lazy: the SOL signature poll runs every 10 s only for `PAYMENT_TIMEOUT` after a 402 (and after a failed poll), otherwise every 5 min; a claim does not wait for it — the buyer's signature is checked directly. An idle agent makes about 9k requests a month (USDC-only: the same, from `getHealth`), plus 360 per hour while a payment is pending. One free keyed RPC (Helius Free: 1M credits) serves dozens of agents.
 - **USDC goes over x402 and the agent pays the network fee.** That is why it rejects transactions with a compute limit above 60 000 or a priority fee above 30 000 lamports. The agent loses SOL only on a transaction that fails on-chain; simulation rejects a bad one for free. Against racing payments from one account the agent has three throttles, all answering 429 with `Retry-After`:
   - one settle at a time per buyer account (`settle_in_progress`);
   - a pause on the account after an on-chain failure (`source_cooldown`);

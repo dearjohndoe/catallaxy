@@ -90,7 +90,9 @@ All optional — the defaults work for ordinary deploys.
 | TONAPI_FALLBACK_DISABLED | 0 | `=1` disables the TonAPI fallback in monitors. Only ADNL/LiteBalancer remain. |
 | BALANCER_REBUILD_INTERVAL_SEC | 3600 | Interval (s) for background rebuilds of the verifiers'/sender's `LiteBalancer`. Cheap insurance against accumulating balancer state. ±15% jitter applied. |
 | BALANCER_REBUILD_DISABLED | 0 | `=1` disables periodic balancer rebuilds. |
-| PAYMENT_MONITOR_MAX_AGE_SEC | 60 | Seconds without a successful poll before a monitor is considered stale. If on preflight (no `tx_hash`) the monitor for the chosen rail is stale, the sidecar returns **503 Retry-After: 60** instead of 402, so the client never pays blind. |
+| PAYMENT_MONITOR_MAX_AGE_SEC | 60 | Seconds without a successful poll before a monitor is considered stale. If on preflight (no `tx_hash`) the monitor for the chosen rail is stale, the sidecar returns **503 Retry-After: 60** instead of 402, so the client never pays blind. Solana rails (SOL, USDC) poll lazily: while their polls succeed, the idle gap (`SOL_IDLE_POLL_INTERVAL_SEC` + 60 s) is not counted as stale; after a failed poll this bound applies. |
+| SOL_POLL_INTERVAL_SEC | 10 | SOL payment poll while a payment is expected (`PAYMENT_TIMEOUT` after a 402) or after an RPC failure. |
+| SOL_IDLE_POLL_INTERVAL_SEC | 300 | Idle cadence of the SOL poll and of the USDC `getHealth` probe. An idle agent makes ~9k RPC requests a month instead of ~260k; set equal to `SOL_POLL_INTERVAL_SEC` to always poll fast. |
 
 `TONAPI_KEY` is now used by both agent code and the sidecar itself (in
 WalletMonitor / JettonWalletMonitor) — set it in every .env that does payment polling.
