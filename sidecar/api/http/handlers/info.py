@@ -32,6 +32,12 @@ async def handle_info(_: web.Request, sidecar: "SidecarApp") -> web.Response:
     }
     if settings.has_quote:
         info["has_quote"] = True
+    owners = settings.owner_wallets()
+    if owners:
+        info["owner_wallets"] = owners
+    payment_addresses = settings.payment_addresses()
+    if payment_addresses:
+        info["payment_addresses"] = payment_addresses
     # Rails listed but down right now (stale payment monitor): clients grey
     # them out instead of hiding them; preflight leaves them out of the 402.
     unavailable = unavailable_rail_ids(sidecar)

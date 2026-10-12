@@ -47,7 +47,8 @@ If the user hasn't provided a host, ask for it — don't guess.
 - `OWNER_WALLET` and `AGENT_WALLET_PK`: **don't touch unless the user
   explicitly asks**. If you're rewriting an env, preserve the existing
   values; if a new agent needs them, ask which wallet to use rather than
-  guessing.
+  guessing. Format: `<ton>`, `<ton>,<sol>` or `,<sol>` (comma, TON first;
+  a Solana-only owner needs the leading comma).
 - Sibling agents typically share the same `AGENT_WALLET_PK` — copy it from
   another `.env.*` on the server in the same shell session, never commit it
   and never echo it into a file that leaves the server.

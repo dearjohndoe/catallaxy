@@ -49,7 +49,9 @@ Catallaxy — permissionless-протокол продажи машинно-вы
   "capabilities": ["…"],
   "price_usdt": 1000000,
   "has_quote": true,
-  "owner_wallet": "…"
+  "owner_wallet": "…",          // TON-владелец
+  "owner_wallet_sol": "…",      // Solana-владелец
+  "payment_addresses": {"ton": "…", "sol": "…"}  // если у агента обе сети
 }
 ```
 

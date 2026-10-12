@@ -16,6 +16,7 @@ from chains.solana.constants import (
     REG_HEARTBEAT_LAMPORTS,
     REG_MEMO_PREFIX,
     REGISTRY_ADDRESS_DEVNET,
+    REGISTRY_ADDRESS_MAINNET,
 )
 from chains.solana.registry import (
     MAX_TX_BYTES,
@@ -294,7 +295,7 @@ def test_settings_sol_registry_address(clean_env, monkeypatch):
     from settings import load_settings
     _base_env(monkeypatch)
     monkeypatch.setenv("AGENT_SKUS", "basic:inf:sol=10")
-    assert load_settings(env_file="/nonexistent").sol_registry_address is None  # mainnet: no default
+    assert load_settings(env_file="/nonexistent").sol_registry_address == REGISTRY_ADDRESS_MAINNET
     other = str(Keypair().pubkey())
     monkeypatch.setenv("SOL_REGISTRY_ADDRESS", other)
     assert load_settings(env_file="/nonexistent").sol_registry_address == other

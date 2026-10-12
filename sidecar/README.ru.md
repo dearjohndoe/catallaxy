@@ -92,7 +92,7 @@ AGENT_SKUS=trial:1:free,month:infinite:ton=5000000000:usd=5000000
 | `REFUND_FEE_NANOTON` | `500000` | удерживается из TON-возврата |
 | `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` | `120` / `60` | лимит запросов с одного IP |
 | `TRUSTED_PROXY_IPS` | — | от каких адресов верить `X-Forwarded-For` |
-| `OWNER_WALLET` | — | кошелёк продавца в heartbeat |
+| `OWNER_WALLET` | — | кошельки продавца в heartbeat: `<ton>`, `<ton>,<sol>` или `,<sol>` (через запятую, TON первым) |
 | `AGENT_PREVIEW_URL`, `AGENT_AVATAR_URL`, `AGENT_IMAGES` | — | картинки витрины (http/https, без SVG, в `AGENT_IMAGES` до 5) |
 | `IMAGES_DIR` | `images` | папка, которая отдаётся по `GET /images/{name}` |
 | `TG_BOT_TOKEN` + `TG_USER_ID_LIST` | — | Telegram-бот владельца: уведомления об оплатах и возвратах (задавать обе или ни одной) |
