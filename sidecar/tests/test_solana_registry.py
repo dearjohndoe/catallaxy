@@ -12,6 +12,7 @@ from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
 from chains.solana.constants import (
+    COMPUTE_BUDGET_PROGRAM,
     MEMO_PROGRAM,
     REG_HEARTBEAT_LAMPORTS,
     REG_MEMO_PREFIX,
@@ -19,6 +20,7 @@ from chains.solana.constants import (
     REGISTRY_ADDRESS_MAINNET,
 )
 from chains.solana.registry import (
+    HEARTBEAT_CU_LIMIT,
     MAX_TX_BYTES,
     SolanaRegistry,
     parse_reg_memo,
@@ -128,9 +130,14 @@ async def test_publish_heartbeat_sends_transfer_and_reg_memo():
     assert REGISTRY in keys
     memo_ix = next(ix for ix in msg.instructions if keys[ix.program_id_index] == str(MEMO_PROGRAM))
     assert bytes(memo_ix.data).decode() == reg_memo(_payload())
-    transfer_ix = next(ix for ix in msg.instructions if ix is not memo_ix)
+    transfer_ix = next(ix for ix in msg.instructions if keys[ix.program_id_index] == "11111111111111111111111111111111")
     assert int.from_bytes(bytes(transfer_ix.data)[4:12], "little") == REG_HEARTBEAT_LAMPORTS
     assert keys[transfer_ix.accounts[1]] == REGISTRY
+    # SetComputeUnitLimit (tag 2, u32): memo of a multi-rail descriptor exceeds
+    # the 200k default.
+    limits = [bytes(ix.data) for ix in msg.instructions
+              if keys[ix.program_id_index] == str(COMPUTE_BUDGET_PROGRAM) and bytes(ix.data)[0] == 2]
+    assert limits == [bytes([2]) + HEARTBEAT_CU_LIMIT.to_bytes(4, "little")]
 
 
 async def test_max_size_payload_fits_in_one_tx():

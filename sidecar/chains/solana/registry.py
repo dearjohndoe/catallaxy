@@ -15,6 +15,7 @@ import logging
 import time
 from typing import Any
 
+from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
 from solders.hash import Hash
 from solders.instruction import AccountMeta, Instruction
 from solders.keypair import Keypair
@@ -30,6 +31,12 @@ logger = logging.getLogger("sidecar")
 
 # Hard limit of a serialized Solana transaction.
 MAX_TX_BYTES = 1232
+
+# Memo program cost grows with memo length (~350 CU/byte): a ~570-byte
+# multi-rail descriptor already burns past the 200k default and fails with
+# "exceeded CUs meter". 1.4M is the per-tx max; at 1 micro-lamport/CU the
+# priority fee stays ~1 lamport.
+HEARTBEAT_CU_LIMIT = 1_400_000
 
 
 def reg_memo(payload: dict[str, Any]) -> str:
@@ -120,6 +127,8 @@ class SolanaRegistry:
     def build_tx(self, payload: dict[str, Any], blockhash: str) -> VersionedTransaction:
         seller = self._kp.pubkey()
         ixs = [
+            set_compute_unit_limit(HEARTBEAT_CU_LIMIT),
+            set_compute_unit_price(1),
             transfer(TransferParams(from_pubkey=seller, to_pubkey=self.registry, lamports=self._lamports)),
             Instruction(MEMO_PROGRAM, reg_memo(payload).encode(), [AccountMeta(seller, True, False)]),
         ]
